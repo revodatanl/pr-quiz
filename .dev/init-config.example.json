@@ -1,0 +1,11 @@
+{
+  "project_name": "pr-quiz",
+  "workspace_host": "https://dbc-XXXXXXXX-XXXX.cloud.databricks.com",
+  "catalog": "workspace",
+  "schema": "pr_quiz",
+  "warehouse_id": "",
+  "serving_endpoint": "databricks-gpt-oss-120b",
+  "secret_scope": "pr-quiz",
+  "secret_key_github": "github_token",
+  "status_context": "quiz-gate"
+}

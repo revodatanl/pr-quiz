@@ -1,0 +1,28 @@
+-- Keep in sync with POOL_TABLE_DDL in src/job/generate_quiz.py -
+-- tests/test_ddl_sync.py fails on any column/type/nullability drift.
+CREATE TABLE IF NOT EXISTS `{{.catalog}}`.`{{.schema}}`.question_pool (
+  provider        STRING  NOT NULL,
+  repo            STRING  NOT NULL,
+  head_sha        STRING  NOT NULL,
+  pr_number       INT,
+  question_id     STRING  NOT NULL,
+  question        STRING  NOT NULL,
+  options         ARRAY<STRING> NOT NULL,
+  correct_index   INT     NOT NULL,
+  explanation     STRING,
+  n_per_attempt   INT     NOT NULL,
+  generated_at    TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS `{{.catalog}}`.`{{.schema}}`.quiz_results (
+  provider        STRING  NOT NULL,
+  repo            STRING  NOT NULL,
+  head_sha        STRING  NOT NULL,
+  pr_number       INT,
+  taker           STRING,
+  score_pct       DOUBLE  NOT NULL,
+  n_questions     INT     NOT NULL,
+  passed          BOOLEAN NOT NULL,
+  question_ids    STRING,
+  submitted_at    TIMESTAMP NOT NULL
+);

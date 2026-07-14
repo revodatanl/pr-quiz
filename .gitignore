@@ -1,0 +1,10 @@
+.databricks/
+.build/
+__pycache__/
+.pytest_cache/
+.venv/
+.just/shell.justfile
+.ci-sp-client-id
+pr-quiz-backend.json
+.dev/*
+!.dev/init-config.example.json

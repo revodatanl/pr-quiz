@@ -1,0 +1,35 @@
+# Theme for the quiz app. [theme.dark] mirrors the light palette on purpose:
+# the injected styles.css is light-palette-only, so OS-dark users must get
+# the identical light design instead of Streamlit's dark defaults bleeding
+# through.
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#D82AC8"            # radio dot / toggle / focus ring
+backgroundColor = "#F7F8FD"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#0A0A56"
+linkColor = "#3D21A3"
+borderColor = "#DFE2F2"
+baseRadius = "17px"
+buttonRadius = "full"
+font = "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
+headingFont = "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
+
+# Inter variable font, fetched browser-side; falls back silently to the system
+# stack above if the fetch fails.
+[[theme.fontFaces]]
+family = "Inter"
+url = "https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMw2boKoduKmMEVuLyfAZ9hiA.woff2"
+weight = "100 900"
+
+[theme.dark]
+primaryColor = "#D82AC8"
+backgroundColor = "#F7F8FD"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#0A0A56"
+linkColor = "#3D21A3"
+borderColor = "#DFE2F2"

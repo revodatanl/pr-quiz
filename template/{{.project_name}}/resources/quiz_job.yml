@@ -1,0 +1,42 @@
+resources:
+  jobs:
+    quiz_generator:
+      name: ${var.job_name}
+      description: Generate PR quiz questions into ${var.catalog}.${var.schema}.question_pool
+      max_concurrent_runs: 2
+      queue:
+        enabled: true
+      parameters:
+        - name: pr_number
+          default: "0"
+        - name: head_sha
+          default: ""
+        - name: repo
+          default: ""
+        - name: provider
+          default: "github"
+      environments:
+        - environment_key: default
+          spec:
+            # Serverless environment version 4 supplies the Python runtime and
+            # the third-party libraries this job imports at run time (requests,
+            # databricks-sdk) alongside Spark. Bumping this version is a
+            # deliberate, tested change — see docs/operating.md.
+            environment_version: "4"
+      tasks:
+        - task_key: generate
+          environment_key: default
+          spark_python_task:
+            python_file: ../src/job/generate_quiz.py
+            parameters:
+              # {{job.parameters.*}} placeholders resolve at job run time.
+              # Safe from `databricks bundle init` Go-templating: only *.tmpl
+              # files are rendered; this file is copied verbatim.
+              - "--pr-number={{job.parameters.pr_number}}"
+              - "--head-sha={{job.parameters.head_sha}}"
+              - "--repo={{job.parameters.repo}}"
+              - "--provider={{job.parameters.provider}}"
+              - "--endpoint=${var.serving_endpoint}"
+              - "--table=${var.catalog}.${var.schema}.question_pool"
+              - "--secret-scope=${var.secret_scope}"
+              - "--secret-key=${var.secret_key_github}"

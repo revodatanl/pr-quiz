@@ -1,0 +1,206 @@
+%%::: mermaid
+flowchart TB
+%%{init: {'theme': 'neutral'}}%%
+
+    %% ═══════════════════════════════════════════════════════════
+    %% PURPOSE: AI quiz merge gate (v2) — a PR can only merge to
+    %% main/master when the quiz-gate COMMIT STATUS is passing.
+    %% The quiz is AI-generated AUTOMATICALLY from the PR diff on
+    %% open/reopen and served via a WebApp; a passing status needs
+    %% the last published result to belong to the PR's latest
+    %% commit AND score 100%. Automated-dependency bots (e.g.
+    %% dependabot) bypass the quiz with an automatic passing status.
+
+    %% READING GUIDE:
+    %% - Subgraphs = process stages (PR, quiz generation, WebApp, gate)
+    %% - (("...")) double-circle = human actors
+    %% - (["..."]) stadium = event trigger / terminal state
+    %% - [("...")] cylinder = persistent stores
+    %% - {"..."} diamond = decision points
+    %% - Generation is AUTOMATIC on PR open/reopen; a /quiz comment
+    %%   regenerates for the latest commit (e.g. after new commits).
+    %%   New commits (synchronize) set the gate PENDING via mark-stale.
+    %%   A /quiz-check comment re-evaluates the gate on demand.
+    %% - Question count N scales with PR size AND AI-judged
+    %%   difficulty (factor 0.2 – 5.0): N = size × difficulty,
+    %%   clamped 1 – 20. Very large diffs skip the judge (max N
+    %%   guaranteed). The AI generates at least 5 × N questions,
+    %%   prompted per diff chunk, so repeat attempts rotate questions.
+
+    %% CROSS-SUBGRAPH RULE:
+    %% Cross-subgraph edges connect modules at SAME nesting
+    %% level, NOT individual children. Inter-subgraph edges
+    %% represent aggregate dependency between modules.
+    %% ═══════════════════════════════════════════════════════════
+
+    %% SECTION 1: NODES AND SUBGRAPHS (no connections here)
+
+    Developer(("👤<br>Developer"))
+    TeamMember(("👤<br>Team member"))
+
+    subgraph PullRequestFlow["Pull Request"]
+        direction TB
+        OpenReopenPR["PR opened / reopened<br>(auto-triggers quiz)"]
+        PushCommits["Push new commits<br>(synchronize — updates head SHA)"]
+        CommentQuiz(["Comment /quiz<br>(regenerate for latest commit)"])
+        CommentQuizCheck(["Comment /quiz-check<br>(re-evaluate gate)"])
+    end
+
+    subgraph QuizGeneration["Quiz Generation — AI"]
+        direction TB
+        WaiveAuthorCheck{"PR author an<br>allow-listed bot?<br>(e.g. dependabot)"}
+        WaiveGate(["Post passing gate status<br>(waived — quiz skipped)"])
+        NewCommitCheck{"Event = new commit<br>(synchronize)?"}
+        MarkStalePending["mark-stale: set gate pending<br>on new head SHA"]
+        SetGatePending["Set gate status pending<br>(quiz being generated)"]
+        AnalyzeDiffSize["Analyze PR diff size"]
+        JudgeSkipCheck{"Diff ≥ ~4000<br>changed lines?"}
+        JudgeDifficulty["AI judges diff difficulty<br>(factor 0.2 – 5.0)"]
+        ComputeQuestionCount["Compute question count N<br>(size × difficulty → 1 – 20)"]
+        GenerateQuestions["AI generates ≥ 5 × N questions<br>(prompted per diff chunk, pool enables rotation)"]
+        PostQuizLink["Post quiz link comment on PR"]
+    end
+
+    subgraph QuizWebApp["Quiz WebApp"]
+        direction TB
+        ServeRotatedQuestions["Serve N questions from pool<br>(each attempt gets different questions)"]
+        SubmitAttempt["Submit attempt<br>(any team member)"]
+        GradeAttempt["Grade attempt & post commit<br>status (on every attempt)"]
+        ScoreCheck{"Score 100%?"}
+        PostPassComment["Post pass comment on PR"]
+        QuizPassed(["Quiz passed"])
+    end
+
+    subgraph MergeGateCI["Merge Gate — Commit Status + Branch Protection"]
+        direction TB
+        ReadLatestResult["Read last published quiz result<br>(app attempt or /quiz-check)"]
+        CommitMatchCheck{"Result for latest<br>PR commit?"}
+        PerfectScoreCheck{"Score 100%?"}
+        AllowMerge["Merge allowed<br>(quiz-gate status passes)"]
+        BlockMerge["Merge blocked<br>(quiz-gate status fails)"]
+    end
+
+    QuestionPool[("Question pool<br>(≥ 5 × N per commit)")]
+    QuizResults[("Quiz results<br>(score + commit SHA)")]
+    MainBranch[("main / master")]
+
+    %% SECTION 2: CONNECTIONS (one per line, grouped by scope)
+
+    %% Actor interactions
+    Developer -->|"Pushes commits, comments /quiz"| PullRequestFlow
+    TeamMember -->|"Takes quiz (any team member)"| QuizWebApp
+
+    %% Internal Pull Request flow
+        OpenReopenPR --> PushCommits
+        PushCommits -->|"developer regenerates"| CommentQuiz
+
+    %% Internal Quiz Generation flow (auto on open/reopen, or /quiz)
+        WaiveAuthorCheck -->|"Yes — bot PR"| WaiveGate
+        WaiveAuthorCheck -->|"No — human PR"| NewCommitCheck
+        NewCommitCheck -->|"Yes — new commit"| MarkStalePending
+        NewCommitCheck -->|"No — open/reopen or /quiz"| SetGatePending
+        SetGatePending --> AnalyzeDiffSize
+        AnalyzeDiffSize --> JudgeSkipCheck
+        JudgeSkipCheck -->|"No"| JudgeDifficulty
+        JudgeSkipCheck -->|"Yes — max N guaranteed,<br>neutral factor"| ComputeQuestionCount
+        JudgeDifficulty --> ComputeQuestionCount
+        ComputeQuestionCount --> GenerateQuestions
+        GenerateQuestions --> PostQuizLink
+
+    %% Internal WebApp flow (retake loop rotates questions)
+        ServeRotatedQuestions --> SubmitAttempt
+        SubmitAttempt --> GradeAttempt
+        GradeAttempt --> ScoreCheck
+        ScoreCheck -->|"No — retake with<br>different questions"| ServeRotatedQuestions
+        ScoreCheck -->|"Yes"| PostPassComment
+        PostPassComment --> QuizPassed
+
+    %% Internal Merge Gate flow
+        ReadLatestResult --> CommitMatchCheck
+        CommitMatchCheck -->|"Yes"| PerfectScoreCheck
+        CommitMatchCheck -->|"No — missing or stale<br>(new commits pushed)"| BlockMerge
+        PerfectScoreCheck -->|"Yes"| AllowMerge
+        PerfectScoreCheck -->|"No"| BlockMerge
+
+    %% Cross-module flow
+    PullRequestFlow -->|"open/reopen, /quiz, or synchronize"| QuizGeneration
+    QuizGeneration -.->|"bot waiver → passing status"| MergeGateCI
+    QuizWebApp -.->|"posts commit status per attempt"| MergeGateCI
+    PullRequestFlow -.->|"/quiz-check re-evaluates gate"| MergeGateCI
+    %% Two-way dotted: gate reports blocked, developer reacts
+    Developer <-.->|"Blocked → comment /quiz<br>for the latest commit"| MergeGateCI
+
+    %% Module ↔ store — QuestionPool ranks ABOVE the WebApp
+    %% (declared pool-first); QuizResults ranks BELOW the WebApp
+    %% and above the merge gate (declared WebApp-first, gate-after)
+    QuizGeneration ==x|"Store ≥ 5 × N questions"| QuestionPool
+    QuestionPool -->|"Serves N questions per attempt"| QuizWebApp
+    QuizWebApp ==x|"Publish result per commit"| QuizResults
+    QuizResults -->|"Provides last published result"| MergeGateCI
+
+    %% Output
+    MergeGateCI ==x|"Merge PR"| MainBranch
+
+    %% SECTION 3: LEGEND
+
+    subgraph LEGEND["<H2> Legend </H2>"]
+        direction LR
+        legendActor(("👤 Actor"))
+        legendStep["Process step"]
+        legendStore[("Store")]
+        legendDecision{"Decision"}
+        legendTrigger(["Trigger / terminal"])
+        legendSuccess["Success"]
+        legendError["Failure"]
+    end
+    legendActor -->|"FLOW"| legendStep
+    legendStep ==x|"WRITE"| legendStore
+    legendStore -.->|"ASYNC TRIGGER"| legendDecision
+    legendDecision <-.->|"FEEDBACK"| legendTrigger
+    legendTrigger ~~~ legendSuccess
+    legendSuccess ~~~ legendError
+
+    %% Align the Developer actor directly beneath the Legend box
+    %% (defined after the LEGEND subgraph to avoid a forward reference)
+    LEGEND ~~~ Developer
+
+    %% SECTION 4: STYLE DEFINITIONS (classDef)
+    %% Named CSS colors only — never hex codes.
+
+    %% Node types
+    classDef function fill:steelblue,stroke:darkblue,color:white
+    classDef trigger fill:aliceblue,stroke:royalblue,color:midnightblue
+    classDef store fill:darkseagreen,stroke:seagreen,color:black
+    classDef decision fill:navajowhite,stroke:goldenrod,color:black
+    classDef success fill:palegreen,stroke:forestgreen,color:black
+    classDef error fill:tomato,stroke:darkred,color:white
+    classDef actor fill:dodgerblue,stroke:rebeccapurple,color:white
+
+    %% Subgraph types
+    classDef prBundle fill:aliceblue,stroke:royalblue,color:midnightblue
+    classDef aiBundle fill:blanchedalmond,stroke:darkorange,color:darkslategray
+    classDef webBundle fill:beige,stroke:darkolivegreen,color:darkslategray
+    classDef ciBundle fill:lightgray,stroke:lightslategray,color:midnightblue
+
+    %% SECTION 5: CLASS ASSIGNMENTS (group by type, not subgraph)
+
+    class OpenReopenPR,PushCommits function
+    class SetGatePending,MarkStalePending,AnalyzeDiffSize,JudgeDifficulty,ComputeQuestionCount,GenerateQuestions,PostQuizLink function
+    class ServeRotatedQuestions,SubmitAttempt,GradeAttempt,PostPassComment function
+    class ReadLatestResult,legendStep function
+
+    class CommentQuiz,CommentQuizCheck,WaiveGate,QuizPassed,legendTrigger trigger
+    class QuestionPool,QuizResults,MainBranch,legendStore store
+    class WaiveAuthorCheck,NewCommitCheck,ScoreCheck,CommitMatchCheck,PerfectScoreCheck,JudgeSkipCheck,legendDecision decision
+    class AllowMerge,legendSuccess success
+    class BlockMerge,legendError error
+    class Developer,TeamMember,legendActor actor
+
+    class PullRequestFlow prBundle
+    class QuizGeneration aiBundle
+    class QuizWebApp webBundle
+    class MergeGateCI ciBundle
+
+    %% One-off styles
+    style LEGEND fill:aliceblue,stroke:black,stroke-width:4px,color:black
+%%:::

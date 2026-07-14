@@ -1,0 +1,21 @@
+version: 2
+
+# Dependency updates for this repo's OWN tooling only:
+#   - GitHub Actions used by the CI and reusable workflows (SHA-pinned).
+#   - The pinned dev-dependency manifest (requirements-dev.txt) at the root.
+#
+# The Streamlit app under template/{{.project_name}}/src/app/ is deliberately
+# NOT tracked here. Its path contains a Go template segment ({{.project_name}})
+# that dependabot cannot resolve, and its requirements.txt uses intentionally
+# bounded version ranges that are a template feature — they are pinned when an
+# adopter renders and deploys the bundle, not in this repo.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly

@@ -1,0 +1,76 @@
+{
+  "welcome_message": "\nPR Quiz - a merge gate that quizzes PR reviewers on the diff before allowing merge.\nThis template deploys the Databricks side: a UC schema, a quiz-generation job, and a Streamlit app.",
+  "properties": {
+    "project_name": {
+      "type": "string",
+      "default": "pr-quiz",
+      "description": "Project name. Becomes the bundle name and the default app/job name prefix (lowercase letters, digits, hyphens; must fit Databricks app-name rules, max 26 chars)",
+      "pattern": "^[a-z][a-z0-9-]{0,24}[a-z0-9]$",
+      "pattern_match_failure_message": "Must start with a lowercase letter, contain only lowercase letters, digits and hyphens, and be 2-26 characters.",
+      "order": 1
+    },
+    "workspace_host": {
+      "type": "string",
+      "description": "Databricks workspace URL to deploy to, e.g. https://dbc-xxxxxxxx-xxxx.cloud.databricks.com",
+      "pattern": "^https://.+$",
+      "pattern_match_failure_message": "Must be a full https:// workspace URL.",
+      "order": 2
+    },
+    "catalog": {
+      "type": "string",
+      "default": "workspace",
+      "description": "Unity Catalog catalog that will hold the quiz schema ('workspace' on Free Edition)",
+      "pattern": "^[A-Za-z0-9_]+$",
+      "pattern_match_failure_message": "Catalog names may contain only letters, digits, and underscores.",
+      "order": 3
+    },
+    "schema": {
+      "type": "string",
+      "default": "pr_quiz",
+      "description": "Schema for the quiz tables (question_pool, quiz_results); created by the bundle",
+      "pattern": "^[A-Za-z0-9_]+$",
+      "pattern_match_failure_message": "Schema names may contain only letters, digits, and underscores.",
+      "order": 4
+    },
+    "warehouse_id": {
+      "type": "string",
+      "description": "ID of a SQL warehouse the app can use (Compute > SQL warehouses > your warehouse > ID)",
+      "pattern": "^[0-9a-f]{16}$",
+      "pattern_match_failure_message": "Must be the 16-character hex warehouse ID (e.g. 0123456789abcdef), not the warehouse name.",
+      "order": 5
+    },
+    "serving_endpoint": {
+      "type": "string",
+      "default": "databricks-gpt-oss-120b",
+      "description": "Foundation-model serving endpoint used to generate quiz questions",
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "pattern_match_failure_message": "Endpoint names may contain only letters, digits, underscores, dots, and hyphens.",
+      "order": 6
+    },
+    "secret_scope": {
+      "type": "string",
+      "default": "pr-quiz",
+      "description": "Secret scope holding the GitHub token used to fetch diffs and post statuses",
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "pattern_match_failure_message": "Secret scope names may contain only letters, digits, underscores, dots, and hyphens.",
+      "order": 7
+    },
+    "secret_key_github": {
+      "type": "string",
+      "default": "github_token",
+      "description": "Secret key (inside the scope above) holding the GitHub token",
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "pattern_match_failure_message": "Secret key names may contain only letters, digits, underscores, dots, and hyphens.",
+      "order": 8
+    },
+    "status_context": {
+      "type": "string",
+      "default": "quiz-gate",
+      "description": "Commit-status context the merge gate posts under; must match QUIZ_STATUS_CONTEXT in the caller workflows and the branch-protection required check",
+      "pattern": "^[A-Za-z0-9._/-]+$",
+      "pattern_match_failure_message": "Status context may contain only letters, digits, underscores, dots, slashes, and hyphens.",
+      "order": 9
+    }
+  },
+  "success_message": "\nProject '{{.project_name}}' initialized.\n\nNext steps:\n  1. cd {{.project_name}}\n  2. databricks secrets create-scope {{.secret_scope}}   (if it does not exist yet)\n  3. databricks secrets put-secret {{.secret_scope}} {{.secret_key_github}} --string-value <github-token>\n  4. databricks bundle deploy   (creates the {{.catalog}}.{{.schema}} schema, the job, and the app)\n  5. python scripts/sql_exec.py --file sql/init_tables.sql --warehouse-id {{.warehouse_id}}   (creates the quiz tables; add --profile <p> if you use CLI profiles)\n  6. databricks bundle run quiz_app"
+}

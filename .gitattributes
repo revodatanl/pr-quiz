@@ -1,0 +1,15 @@
+# Normalize line endings to LF for every text file, regardless of contributor
+# OS. A Windows checkout (core.autocrlf) would otherwise get CRLF, which breaks
+# bash scripts (a stray `\r` under `set -euo pipefail`), the justfiles, and
+# `just fmt-check`. CI runs on Linux and expects LF.
+* text=auto eol=lf
+
+# Shell scripts must always be LF (explicit; also covered by the rule above).
+*.sh text eol=lf
+
+# Binary assets: never normalize line endings or treat as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary

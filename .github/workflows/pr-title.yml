@@ -1,0 +1,37 @@
+# Lint the PR title as a Conventional Commit.
+#
+# This repo squash-merges PRs, so the PR *title* becomes the squash commit
+# subject on the default branch. Enforcing Conventional Commits on the title
+# therefore keeps the commit history clean and lets `cz bump` derive versions
+# and changelog entries from it. We validate with commitizen (`cz check`),
+# reusing the repo's `.cz.toml` (cz_conventional_commits).
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-pr-title:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # cz reads the repo's .cz.toml; no credentials needed post-checkout.
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+      - name: Install commitizen
+        # Keep this pin in sync with commitizen in requirements-dev.txt.
+        run: python -m pip install --disable-pip-version-check commitizen==4.16.4
+      - name: Check PR title is a Conventional Commit
+        env:
+          # Passed via env (never inlined into run:) to avoid shell injection
+          # from an attacker-controlled PR title.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: cz check --message "$PR_TITLE"

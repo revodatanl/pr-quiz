@@ -1,0 +1,48 @@
+# PR-quiz caller: generates a quiz for each PR and manages the merge-gate
+# commit status. Copy this file to .github/workflows/quiz-generate.yml in
+# your repo, then:
+#
+#   1. Replace OWNER/REPO in `uses:` below and PIN it to a released tag or
+#      commit SHA (e.g. @v1) - never a moving branch.
+#   2. Set repo secrets: DATABRICKS_HOST, DATABRICKS_CLIENT_ID,
+#      DATABRICKS_CLIENT_SECRET (a service principal that can run the quiz
+#      job and manage the quiz app).
+#   3. Optionally set repo variables (defaults shown below): QUIZ_APP_NAME,
+#      QUIZ_JOB_NAME, QUIZ_STATUS_CONTEXT, QUIZ_WAIVE_AUTHORS, QUIZ_TARGET_BRANCH.
+#   4. Adjust `branches:` below AND QUIZ_TARGET_BRANCH (or its fallback) to
+#      the branch your quiz gate protects: the `branches:` filter only
+#      applies to pull_request events, not to /quiz comments - target_branch
+#      is what stops /quiz from generating quizzes for PRs into other
+#      branches.
+#
+# Note: issue_comment workflows only run the version on your DEFAULT branch -
+# /quiz does nothing until this file is merged there.
+name: quiz-generate
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: [main]  # branches whose PRs require the quiz gate
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+jobs:
+  quiz-generate:
+    uses: OWNER/REPO/.github/workflows/quiz-generate.yml@v1  # <-- replace + pin
+    with:
+      # `|| 'x'` keeps an unset variable from overriding the reusable
+      # workflow's default with an empty string.
+      app_name: ${{ vars.QUIZ_APP_NAME || 'pr-quiz' }}
+      job_name: ${{ vars.QUIZ_JOB_NAME || 'pr-quiz-generator' }}
+      status_context: ${{ vars.QUIZ_STATUS_CONTEXT || 'quiz-gate' }}
+      waive_authors: ${{ vars.QUIZ_WAIVE_AUTHORS || 'dependabot[bot]' }}
+      target_branch: ${{ vars.QUIZ_TARGET_BRANCH || 'main' }}  # keep in sync with `branches:` above
+    secrets:
+      databricks_host: ${{ secrets.DATABRICKS_HOST }}
+      databricks_client_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      databricks_client_secret: ${{ secrets.DATABRICKS_CLIENT_SECRET }}

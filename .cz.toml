@@ -1,0 +1,13 @@
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "1.0.0"
+tag_format = "v$version"
+update_changelog_on_bump = true
+# Auto-rewrites the gate-check@vX.Y.Z pin in quiz-gate.yml in the same commit
+# `cz bump` tags, so the "pin the action in the release commit" invariant
+# (RELEASING.md) can never be forgotten. Matches lines containing `gate-check@v`
+# once the pin is a version tag (set at the first release; a @master or @branch
+# pin is intentionally not matched).
+version_files = [
+  ".github/workflows/quiz-gate.yml:gate-check@v",
+]

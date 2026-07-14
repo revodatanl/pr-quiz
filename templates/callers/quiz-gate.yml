@@ -1,0 +1,43 @@
+# PR-quiz caller: re-evaluates the merge gate on a /quiz-check comment or a
+# manual dispatch. Copy this file to .github/workflows/quiz-gate.yml in your
+# repo, then:
+#
+#   1. Replace OWNER/REPO in `uses:` below and PIN it to a released tag or
+#      commit SHA (e.g. @v1) - never a moving branch.
+#   2. Set repo secrets: DATABRICKS_HOST, DATABRICKS_CLIENT_ID,
+#      DATABRICKS_CLIENT_SECRET (a service principal that can query the
+#      results warehouse).
+#   3. Set repo variable QUIZ_WAREHOUSE_ID (required). Optional variables
+#      (defaults shown below): QUIZ_RESULTS_TABLE, QUIZ_STATUS_CONTEXT.
+#
+# Note: issue_comment workflows only run the version on your DEFAULT branch -
+# /quiz-check does nothing until this file is merged there.
+name: quiz-gate
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to re-evaluate
+        required: true
+
+permissions:
+  pull-requests: read
+  statuses: write
+
+jobs:
+  quiz-gate:
+    uses: OWNER/REPO/.github/workflows/quiz-gate.yml@v1  # <-- replace + pin
+    with:
+      warehouse_id: ${{ vars.QUIZ_WAREHOUSE_ID }}
+      # `|| 'x'` keeps an unset variable from overriding the reusable
+      # workflow's default with an empty string.
+      results_table: ${{ vars.QUIZ_RESULTS_TABLE || 'workspace.pr_quiz.quiz_results' }}
+      status_context: ${{ vars.QUIZ_STATUS_CONTEXT || 'quiz-gate' }}
+      pr_number: ${{ inputs.pr_number }}
+    secrets:
+      databricks_host: ${{ secrets.DATABRICKS_HOST }}
+      databricks_client_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      databricks_client_secret: ${{ secrets.DATABRICKS_CLIENT_SECRET }}

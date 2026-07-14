@@ -1,0 +1,12 @@
+# zizmor unpinned-uses policy: third-party actions MUST be hash-pinned (SHA);
+# this repo's OWN composite action (gate-check) is ref-pinned to its release
+# tag on purpose. A SHA pin for a self-referential action is impossible (the
+# pin lives in the commit the tag will point at), so the tag pin is the only
+# viable form; the release-gate blocks a branch pin and `cz bump` keeps the tag
+# in sync with each release.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "*": hash-pin
+        "revodatanl/*": ref-pin

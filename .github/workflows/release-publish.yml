@@ -1,0 +1,84 @@
+# Release publish (stage 2 of 2).
+#
+# Human-triggered on the default-branch HEAD AFTER the stage-1 prep PR has been
+# squash-merged (still pre-tag). It re-runs the release gates + tests on the
+# exact commit being tagged, refuses to move an already-published tag, then
+# creates the annotated `v<version>` tag, moves the bare `v1` major alias, and
+# publishes a GitHub Release with notes extracted from CHANGELOG.md.
+#
+# Nothing here pushes to the protected default branch -- only tags and a
+# release are created.
+name: Release publish (stage 2)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+      - name: Install dev dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Re-run release gates and tests
+        # Safety net on the exact HEAD being tagged.
+        run: |
+          set -euo pipefail
+          bash scripts/grep_gates.sh --release
+          python -m pytest tests/ -q
+      - name: Tag and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          V="$(cz version --project)"
+
+          # Authenticated remote URL for every remote op: persisted credentials
+          # are disabled, and a PRIVATE repo cannot be read (fetch/ls-remote)
+          # anonymously via `origin`, so pass the token URL explicitly.
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # A published tag is immutable; a re-run must never silently move it.
+          git fetch --tags --force "$REMOTE"
+          if git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then
+            echo "Tag v$V already exists locally; refusing to move a released tag." >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags "$REMOTE" "v$V" >/dev/null 2>&1; then
+            echo "Tag v$V already exists on the remote; refusing to move a released tag." >&2
+            exit 1
+          fi
+
+          git tag -a "v$V" -m "v$V"
+          # Bare major alias so consumers can pin `@v1` and float on patches.
+          git tag -f "v1"
+
+          git push "$REMOTE" "v$V"
+          git push -f "$REMOTE" "v1"
+
+          # Extract just this version's section from the changelog. commitizen
+          # (cz_conventional_commits) writes headers as `## v<version> (date)`,
+          # always with a space before the date, so `( |$)` matches the header
+          # (a literal-paren branch would build an unbalanced regex under gawk).
+          NOTES="$(mktemp)"
+          awk -v v="$V" '
+            BEGIN { pat = "^## v" v "( |$)" }
+            $0 ~ pat { grab = 1; print; next }
+            grab && /^## / { exit }
+            grab { print }
+          ' CHANGELOG.md > "$NOTES"
+
+          gh release create "v$V" --title "v$V" --notes-file "$NOTES"

@@ -1,0 +1,288 @@
+name: quiz-generate (reusable)
+
+# Reusable workflow - not triggered directly. Call it from a thin caller
+# workflow (copy templates/callers/quiz-generate.yml; this repo dogfoods via
+# .github/workflows/caller-quiz-generate.yml). The caller owns the event
+# triggers - in particular the `pull_request: branches:` filter, which cannot
+# be parameterized here - and must grant the permissions declared below.
+# Inside this workflow, github.event.* is the CALLER's triggering event.
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: Name of the Databricks App that serves the quiz.
+        type: string
+        default: pr-quiz
+      job_name:
+        description: Name of the Databricks job that generates the quiz question pool.
+        type: string
+        default: pr-quiz-generator
+      status_context:
+        description: Commit-status context used for the merge gate.
+        type: string
+        default: quiz-gate
+      allowed_associations:
+        description: >
+          Author associations allowed to trigger generation via a /quiz
+          comment. Comma-separated, uppercase, no spaces
+          (e.g. "OWNER,MEMBER,COLLABORATOR").
+        type: string
+        default: OWNER,MEMBER,COLLABORATOR
+      waive_authors:
+        description: >
+          Comma-separated PR author logins whose PRs bypass the quiz gate with
+          an automatic passing status (for automated dependency bots). No
+          spaces (e.g. "dependabot[bot],renovate[bot]"). The reserved "[bot]"
+          suffix on GitHub App logins is not spoofable.
+        type: string
+        default: dependabot[bot]
+      app_url:
+        description: >
+          Public URL of the quiz app. Empty = auto-discover it from app_name
+          via the Databricks CLI after authentication.
+        type: string
+        default: ''
+      target_branch:
+        description: >
+          When set, /quiz comments only generate a quiz for PRs whose base
+          branch equals this value (pull_request events are already filtered
+          by the caller's `branches:`). Empty = generate for any base branch.
+        type: string
+        default: ''
+    secrets:
+      databricks_host:
+        description: Databricks workspace URL.
+        required: true
+      databricks_client_id:
+        description: Service-principal OAuth client id.
+        required: true
+      databricks_client_secret:
+        description: Service-principal OAuth client secret.
+        required: true
+
+# Required caller permissions (deliberately NOT declared here: on fork-PR
+# events the token is force-downgraded to read-only, and a called workflow
+# requesting more than the caller can grant fails the call - declaring write
+# here would turn every fork PR into a red run instead of a clean job skip):
+#   contents: read, pull-requests: write, statuses: write
+# The caller templates carry exactly this block.
+
+jobs:
+  # Automated-dependency PRs (e.g. dependabot) bypass the quiz gate: a human
+  # cannot take a quiz on a bot's PR. Post a passing gate status directly and
+  # skip generation. Runs on synchronize too so a bot force-push re-asserts the
+  # pass. mark-stale and generate are gated OFF for waived authors (below), so
+  # nothing competes to post a conflicting status - no race. The author login
+  # is github.event.pull_request.user.login; the reserved "[bot]" suffix is not
+  # spoofable. Padded-token match (same technique as the author_association
+  # gate) so a partial login can never substring-match into the list.
+  waive:
+    if: >
+      github.event_name == 'pull_request' &&
+      contains(fromJSON('["opened","reopened","synchronize"]'), github.event.action) &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(format(',{0},', inputs.waive_authors),
+               format(',{0},', github.event.pull_request.user.login))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # A rapid bot open + force-push must not fan out redundant status posts;
+    # one running + at most one queued per PR (matches the other jobs).
+    concurrency:
+      group: quiz-waive-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Post passing gate status (quiz waived)
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          STATUS_CONTEXT: ${{ inputs.status_context }}
+        run: |
+          gh api "repos/$REPO/statuses/$SHA" \
+            -f state=success -f context="$STATUS_CONTEXT" \
+            -f description="Quiz waived: automated dependency update"
+
+  # Auto-generates on PR open/reopen; /quiz comment re-generates (e.g. after a
+  # push). Fork PRs are skipped on pull_request events only (those runs get a
+  # read-only token and no secrets); the /quiz comment path runs in base-repo
+  # context with secrets, so a maintainer comment still works for fork PRs.
+  # /quiz is gated on comment author_association (padded-token match so e.g.
+  # NONE can never substring-match into the allowed list).
+  generate:
+    if: >
+      (github.event_name == 'pull_request' &&
+       contains(fromJSON('["opened","reopened"]'), github.event.action) &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       !contains(format(',{0},', inputs.waive_authors),
+                 format(',{0},', github.event.pull_request.user.login))) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       startsWith(github.event.comment.body, '/quiz') &&
+       !startsWith(github.event.comment.body, '/quiz-check') &&
+       contains(format(',{0},', inputs.allowed_associations),
+                format(',{0},', github.event.comment.author_association)))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Comment spam must not fan out parallel LLM generation jobs: one running
+    # + at most one queued run per PR (older queued runs are superseded).
+    concurrency:
+      group: quiz-generate-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+    env:
+      DATABRICKS_HOST: ${{ secrets.databricks_host }}
+      DATABRICKS_CLIENT_ID: ${{ secrets.databricks_client_id }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.databricks_client_secret }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Install Databricks CLI
+        # SHA-pinned (tags are mutable; a moved tag must not change what runs
+        # on adopters' runners). Bump deliberately at release time.
+        uses: databricks/setup-cli@bc7e6aabb6006d8d1758bd25ee1a100935c9cb7c # v1.7.0
+
+      # All event-derived values go through env, never inline ${{ }} inside
+      # run scripts (shell-injection hardening; same rule for every step).
+      - name: Resolve PR number, head SHA and base branch
+        id: pr
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_PR_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_PR_BASE: ${{ github.event.pull_request.base.ref }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            pr=$EVENT_PR_NUMBER
+            sha=$EVENT_PR_SHA
+            base=$EVENT_PR_BASE
+          else
+            pr=$ISSUE_NUMBER
+            pr_json=$(gh pr view "$pr" --repo "$REPO" --json headRefOid,baseRefName)
+            sha=$(jq -r .headRefOid <<<"$pr_json")
+            base=$(jq -r .baseRefName <<<"$pr_json")
+          fi
+          echo "PR #$pr head=$sha base=$base"
+          proceed=true
+          if [ -n "$TARGET_BRANCH" ] && [ "$base" != "$TARGET_BRANCH" ]; then
+            echo "::notice::Skipping quiz generation: PR base branch '$base' does not match target_branch '$TARGET_BRANCH'."
+            proceed=false
+          fi
+          {
+            echo "pr=$pr"
+            echo "sha=$sha"
+            echo "base=$base"
+            echo "proceed=$proceed"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set gate status to pending
+        if: steps.pr.outputs.proceed == 'true'
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.pr.outputs.sha }}
+          STATUS_CONTEXT: ${{ inputs.status_context }}
+        run: |
+          gh api "repos/$REPO/statuses/$SHA" \
+            -f state=pending -f context="$STATUS_CONTEXT" \
+            -f description="Quiz being generated - take it and score 100%"
+
+      - name: Wake the quiz app
+        if: steps.pr.outputs.proceed == 'true'
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+        run: databricks apps start "$APP_NAME" || true
+
+      - name: Resolve quiz app URL
+        if: steps.pr.outputs.proceed == 'true'
+        id: app
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+          APP_URL: ${{ inputs.app_url }}
+        run: |
+          url=$APP_URL
+          if [ -z "$url" ]; then
+            url=$(databricks apps get "$APP_NAME" -o json | jq -r '.url // empty')
+          fi
+          if [ -z "$url" ]; then
+            echo "::error::Could not resolve the quiz app URL: 'databricks apps get $APP_NAME' returned no url. Pass the app_url input or check the app_name input."
+            exit 1
+          fi
+          echo "url=${url%/}" >> "$GITHUB_OUTPUT"
+
+      - name: Run quiz generation job
+        if: steps.pr.outputs.proceed == 'true'
+        env:
+          JOB_NAME: ${{ inputs.job_name }}
+          PR: ${{ steps.pr.outputs.pr }}
+          SHA: ${{ steps.pr.outputs.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          job_id=$(databricks jobs list --name "$JOB_NAME" -o json | jq -r '.[0].job_id // empty')
+          if [ -z "$job_id" ]; then
+            echo "::error::No Databricks job named '$JOB_NAME' found - check the job_name input."
+            exit 1
+          fi
+          # provider is omitted, so the job falls back to its 'github' default;
+          # a provider input here is the v2 extension point for other SCMs.
+          payload=$(jq -cn --argjson job_id "$job_id" --arg pr "$PR" --arg sha "$SHA" --arg repo "$REPO" \
+            '{job_id: $job_id, job_parameters: {pr_number: $pr, head_sha: $sha, repo: $repo}}')
+          databricks jobs run-now --json "$payload"
+
+      - name: Post quiz link on the PR
+        if: steps.pr.outputs.proceed == 'true'
+        env:
+          PR: ${{ steps.pr.outputs.pr }}
+          SHA: ${{ steps.pr.outputs.sha }}
+          REPO: ${{ github.repository }}
+          APP_URL: ${{ steps.app.outputs.url }}
+        run: |
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "🧠 Quiz ready for \`${SHA:0:12}\`: ${APP_URL}/?repo=${REPO}&sha=${SHA}
+
+          Score **100%** to unlock the merge - the gate updates automatically when you pass. (\`/quiz-check\` re-checks manually; app may take ~2 min to wake up.)"
+
+      - name: Set gate status to failure on error
+        # cancelled() included: a timeout-minutes cancellation is not
+        # failure(), and without this the PR is left with a permanently
+        # pending gate and no feedback (seen live when a broken serving
+        # endpoint made the generation job outlast the workflow timeout).
+        if: (failure() || cancelled()) && steps.pr.outputs.sha != ''
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.pr.outputs.sha }}
+          STATUS_CONTEXT: ${{ inputs.status_context }}
+        run: |
+          gh api "repos/$REPO/statuses/$SHA" \
+            -f state=error -f context="$STATUS_CONTEXT" \
+            -f description="Quiz generation failed - see quiz-generate workflow logs"
+
+  # On synchronize the earned quiz pass no longer applies to the new head
+  # commit. No auto-regeneration (renewal is manual via /quiz); this only
+  # posts a pending marker so the required context reads as actionable, not
+  # missing.
+  mark-stale:
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.action == 'synchronize' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !contains(format(',{0},', inputs.waive_authors),
+                format(',{0},', github.event.pull_request.user.login))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: quiz-mark-stale-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Mark quiz gate pending on new head commit
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          STATUS_CONTEXT: ${{ inputs.status_context }}
+        run: |
+          gh api "repos/$REPO/statuses/$SHA" \
+            -f state=pending -f context="$STATUS_CONTEXT" \
+            -f description="New commit - comment /quiz for a fresh quiz (/quiz-check if this commit passed before)"

@@ -1,0 +1,20 @@
+command: ["streamlit", "run", "app.py"]
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: GITHUB_TOKEN
+    valueFrom: github-token
+  - name: SERVING_ENDPOINT
+    valueFrom: llm-endpoint
+  - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+    value: "false"
+  # Baked at `databricks bundle init` render time (this is app.yaml.tmpl): the
+  # deployed app.yaml is a raw file the bundle does NOT variable-substitute, and
+  # injecting these as resource-level `config: env:` proved unreliable
+  # (Databricks CLI #4901), so the values are rendered straight into the file.
+  # quiz_store.py falls back to "workspace.pr_quiz" if QUIZ_SCHEMA is ever
+  # absent (e.g. running app.py locally outside the bundle).
+  - name: QUIZ_SCHEMA
+    value: "{{.catalog}}.{{.schema}}"
+  - name: QUIZ_STATUS_CONTEXT
+    value: "{{.status_context}}"

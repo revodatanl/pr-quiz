@@ -1,0 +1,34 @@
+# Dogfood caller: this repo consumes its own reusable workflow the same way
+# an adopter would (see templates/callers/quiz-gate.yml). Local `uses:` form
+# so PR branches exercise their own copy of the reusable workflow.
+name: quiz-gate
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to re-evaluate
+        required: true
+
+permissions:
+  pull-requests: read
+  statuses: write
+
+jobs:
+  quiz-gate:
+    uses: ./.github/workflows/quiz-gate.yml
+    with:
+      # warehouse_id has no default in the reusable workflow; set the
+      # QUIZ_WAREHOUSE_ID repo variable at bootstrap. For results_table and
+      # status_context, `|| 'x'` keeps an unset variable from overriding the
+      # reusable workflow's default with ''.
+      warehouse_id: ${{ vars.QUIZ_WAREHOUSE_ID }}
+      results_table: ${{ vars.QUIZ_RESULTS_TABLE || 'workspace.pr_quiz.quiz_results' }}
+      status_context: ${{ vars.QUIZ_STATUS_CONTEXT || 'quiz-gate' }}
+      pr_number: ${{ inputs.pr_number }}
+    secrets:
+      databricks_host: ${{ secrets.DATABRICKS_HOST }}
+      databricks_client_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      databricks_client_secret: ${{ secrets.DATABRICKS_CLIENT_SECRET }}

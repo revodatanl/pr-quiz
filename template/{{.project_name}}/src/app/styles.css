@@ -1,0 +1,276 @@
+/*
+  Quiz app design system — the design source of truth.
+
+  Selector rules (Streamlit 1.56 DOM; minor pinned in requirements.txt):
+  - Only flat [data-testid] / [data-baseweb] / [role] attribute selectors,
+    st-key-* classes (from keyed widgets/containers), and our own classes
+    rendered by the ui.py builders.
+  - No descendant chains through anonymous divs; NEVER st-emotion-cache-* hashes.
+  - Styling degrades silently on Streamlit bumps. Smoke check after a bump:
+    glow background + gradient pill submit button + gradient hero headline.
+*/
+
+/* ---- 1. Design tokens ---- */
+:root {
+  --navy: #0A0A56;
+  --deep-purple: #3D21A3;
+  --purple: #9025C1;
+  --magenta: #D82AC8;
+  --coral: #FF768D;
+  --yellow: #FFCE00;
+  --ink: #0A0A56;
+  --muted: #5D628C;
+  --line: #DFE2F2;
+  --shadow: 0 24px 70px rgba(10, 10, 86, .12);
+}
+
+/* ---- 2. App shell: layered glows on a light base ---- */
+[data-testid="stAppViewContainer"] {
+  background:
+    radial-gradient(circle at 0% 0%, rgba(255, 206, 0, .20), transparent 24rem),
+    radial-gradient(circle at 92% 10%, rgba(216, 42, 200, .14), transparent 28rem),
+    radial-gradient(circle at 60% 100%, rgba(61, 33, 163, .12), transparent 30rem),
+    linear-gradient(135deg, #FBFBFF 0%, #F4F5FC 100%);
+}
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stMainBlockContainer"] { max-width: 1084px; padding: 4.5rem 22px 80px; }
+
+/* ---- 3. Custom-HTML components (ui.py builders) ---- */
+.hero, .verdict-card {
+  position: relative; overflow: hidden; border: 1px solid rgba(223, 226, 242, .92);
+  border-radius: 34px; padding: 30px; box-shadow: var(--shadow);
+  background:
+    radial-gradient(circle at 100% 0%, rgba(255, 206, 0, .16), transparent 20rem),
+    radial-gradient(circle at 88% 100%, rgba(216, 42, 200, .10), transparent 22rem),
+    radial-gradient(circle at 0% 100%, rgba(61, 33, 163, .08), transparent 20rem),
+    linear-gradient(135deg, rgba(255, 255, 255, .98), rgba(255, 255, 255, .80));
+}
+.hero { margin-bottom: 20px; }   /* gap before the filter/meta block below */
+.hero-content { position: relative; max-width: 920px; }
+.kicker {
+  display: inline-flex; border-radius: 999px; padding: 8px 12px; color: var(--deep-purple);
+  background: #F1EDFF; font-size: 12px; font-weight: 900; text-transform: uppercase; letter-spacing: .08em;
+}
+.hero-title {
+  font-size: clamp(44px, 6vw, 78px); line-height: .94; margin: 12px 0 12px;
+  font-weight: 950; letter-spacing: -.065em;
+}
+.highlight {
+  background: linear-gradient(90deg, var(--navy), var(--deep-purple) 50%, var(--magenta));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.copy { color: var(--muted); max-width: 720px; font-size: 17px; line-height: 1.62; margin: 0; }
+
+.meta-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px;
+  align-items: stretch; margin: 12px 0 16px;
+}
+.pr-card {
+  border: 1px solid var(--line); border-radius: 22px; padding: 14px 16px;
+  background: rgba(255, 255, 255, .86); box-shadow: 0 16px 40px rgba(10, 10, 86, .08);
+}
+.taker-chip {
+  border: 1px solid var(--line); border-radius: 22px; padding: 14px 16px;
+  background: rgba(255, 255, 255, .62); min-width: 250px;
+}
+.meta-label {
+  color: var(--muted); font-size: 12px; text-transform: uppercase;
+  font-weight: 900; letter-spacing: .07em; margin-bottom: 8px;
+}
+.meta-value { color: var(--navy); font-size: 20px; font-weight: 920; overflow-wrap: anywhere; }
+.meta-sub { color: var(--muted); font-size: 13px; font-weight: 700; margin-top: 6px; }
+
+.quiz-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin: 2px 0 8px; }
+.quiz-title { color: var(--navy); font-size: 24px; font-weight: 930; letter-spacing: -.035em; }
+.quiz-progress-text { color: var(--muted); font-size: 14px; font-weight: 820; }
+
+/* Progress panel stays visible while scrolling the questions. position:sticky
+   loses to Streamlit's overflow wrappers, so progress.js pins the panel itself:
+   past PIN_TOP it adds .progress-pinned (position:fixed, top 0) with left/width
+   set inline from the keyed anchor's rect; padding-top puts the content back at
+   PIN_TOP. Tune PIN_TOP in progress.js. */
+.progress-pinned {
+  position: fixed; z-index: 100;
+  padding: 60px 0 8px; /* top = PIN_TOP (progress.js) */
+}
+.progress-pinned::before {
+  /* Full-bleed replica of the app-shell background (keep in sync with the
+     stAppViewContainer rule above): attachment:fixed sizes the layers to the
+     viewport, so it lines up seamlessly with the real, viewport-stationary
+     background — the panel looks transparent, yet questions scrolling under
+     or above it are fully hidden. */
+  content: ""; position: absolute; z-index: -1;
+  top: 0; bottom: 0; left: -100vw; right: -100vw;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(255, 206, 0, .20), transparent 24rem),
+    radial-gradient(circle at 92% 10%, rgba(216, 42, 200, .14), transparent 28rem),
+    radial-gradient(circle at 60% 100%, rgba(61, 33, 163, .12), transparent 30rem),
+    linear-gradient(135deg, #FBFBFF 0%, #F4F5FC 100%);
+  background-attachment: fixed;
+}
+.st-key-progress-sticky { margin-bottom: 10px; }
+.progress-block { margin-bottom: 0; }
+.progress-block[hidden] { display: none !important; } /* no broken 0/N bar if JS never runs */
+.progress-track {
+  /* stripe geometry (one segment per question) is inline from ui.progress_bar() */
+  position: relative; height: 16px; border: 1px solid #C9CEE7; border-radius: 999px;
+  overflow: hidden; box-shadow: inset 0 1px 3px rgba(10, 10, 86, .10);
+}
+.progress-fill {
+  height: 100%; /* width set inline; ui.progress_script() JS updates it */
+  background: linear-gradient(90deg, var(--deep-purple) 0%, var(--purple) 35%,
+    var(--magenta) 70%, var(--coral) 88%, var(--yellow) 100%);
+  background-size: 250% 100%; background-position: left center;
+  border-radius: 999px; box-shadow: 0 0 0 1px rgba(255, 255, 255, .26) inset;
+  transition: width .25s ease;
+}
+
+.q-topline { display: flex; align-items: flex-start; margin-bottom: 0; }
+.q-text {
+  /* the question itself (the radio's own label is collapsed in app.py);
+     no padding-top: the card tab's Q number is line-centered against this line */
+  color: var(--navy); font-size: 17px; font-weight: 800; line-height: 1.4;
+}
+
+.verdict-card { padding: 24px 28px; margin: 12px 0; }
+.verdict-headline {
+  font-size: clamp(30px, 4vw, 46px); font-weight: 950;
+  letter-spacing: -.05em; line-height: 1.05; margin: 12px 0 10px;
+}
+.verdict-fail .highlight {
+  background: linear-gradient(90deg, var(--purple), var(--magenta) 55%, var(--coral));
+  -webkit-background-clip: text; background-clip: text;
+}
+.verdict-copy { color: var(--muted); font-size: 16px; line-height: 1.6; margin: 4px 0; }
+.verdict-copy code {
+  color: var(--deep-purple); background: #F1EDFF; border-radius: 6px;
+  padding: 2px 6px; font-size: 14px;
+}
+.verdict-copy a { color: var(--deep-purple); font-weight: 800; }
+
+/* ---- 4. Question cards: st.container(key="qcard-{i}") ---- */
+/* The form around all questions is invisible chrome: the cards carry the design. */
+[data-testid="stForm"] { border: 0; padding: 0; counter-reset: qnum; }
+[class*="st-key-qcard-"] {
+  counter-increment: qnum; /* card order = question number, rendered by ::before */
+  position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: 16px;
+  /* left inset clears the 44px corner tab: question text and option pills
+     share one left-alignment line at 56px (44 + 12 gap) */
+  padding: 12px 16px 12px 56px;
+  margin: 12px 0; background: rgba(255, 255, 255, .88); box-shadow: 0 18px 48px rgba(10, 10, 86, .09);
+}
+[class*="st-key-qcard-"]::before {
+  /* One paint surface: corner tab (Q number) + 5px rail, one 180deg gradient.
+     Shape = union of two mask layers (default mask-composite: add): bubble =
+     SVG tab, rail = 5px full-height column. overflow:hidden clips the outer
+     corner to the card radius; the Q number sits in the unmasked tab. On the
+     card itself so the anchor is guaranteed (positioned Streamlit wrappers
+     hijack absolutely-positioned divs injected via st.html). */
+  content: "Q" counter(qnum);
+  position: absolute; left: 0; top: 0; bottom: 0; width: 44px;
+  background: linear-gradient(180deg, var(--deep-purple), var(--magenta), var(--yellow));
+  /* tab path: 44x48 bubble (straight bottom at 48 = 2x the number's y-24
+     center, so the Q sits dead-center in the tab), bottom-right radius 14
+     (V34 Q44 48 30 48), bottom edge to x=15, then a concave flare into the
+     rail (Q5 48 5 58) */
+  -webkit-mask:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 44 58'%3E%3Cpath d='M0 0H44V34Q44 48 30 48H15Q5 48 5 58H0Z'/%3E%3C/svg%3E") 0 0 / 44px 58px no-repeat,
+    linear-gradient(#000 0 0) 0 0 / 5px 100% no-repeat;
+  mask:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 44 58'%3E%3Cpath d='M0 0H44V34Q44 48 30 48H15Q5 48 5 58H0Z'/%3E%3C/svg%3E") 0 0 / 44px 58px no-repeat,
+    linear-gradient(#000 0 0) 0 0 / 5px 100% no-repeat;
+  color: #FFFFFF; font-size: 12px; font-weight: 950;
+  /* line-height 48 = number glyph center at y=24, level with the question's
+     first text line (12px card padding + half of 17px/1.4 line) */
+  line-height: 48px; text-align: center;
+  pointer-events: none;
+}
+/* tighten the topline -> options spacing inside the card */
+[class*="st-key-qcard-"] [data-testid="stVerticalBlock"] { gap: .4rem; }
+
+/* ---- 5. Option rows ---- */
+[class*="st-key-qcard-"] div[role="radiogroup"] > label {
+  width: 100%; margin: 3px 0; padding: 7px 12px; border: 1px solid var(--line);
+  border-radius: 17px; background: #FFFFFF; color: #24275E;
+  align-items: center; /* radio dot vertically centered against the text */
+  transition: border-color .15s ease, background .15s ease;
+}
+[class*="st-key-qcard-"] div[role="radiogroup"] > label p {
+  font-size: 15px; line-height: 1.35;
+}
+[class*="st-key-qcard-"] div[role="radiogroup"] > label:hover { border-color: rgba(144, 37, 193, .45); }
+[class*="st-key-qcard-"] div[role="radiogroup"] > label:has(input[type="radio"]:checked) {
+  border-color: rgba(216, 42, 200, .46);
+  background: linear-gradient(90deg, rgba(216, 42, 200, .08), rgba(255, 206, 0, .10));
+}
+[class*="st-key-qcard-"] div[role="radiogroup"] > label:has(input:focus-visible) {
+  outline: 2px solid var(--deep-purple); outline-offset: 2px;
+}
+
+/* ---- 6. Buttons: gradient pill CTAs + outline pills ---- */
+[data-testid="stFormSubmitButton"] button,
+.st-key-publish-results button {
+  min-height: 54px; width: 100%; border: 0; border-radius: 999px; color: #FFFFFF;
+  background: linear-gradient(90deg, var(--navy), var(--deep-purple), var(--magenta));
+  box-shadow: 0 18px 44px rgba(61, 33, 163, .28);
+}
+[data-testid="stFormSubmitButton"] button:hover,
+.st-key-publish-results button:hover { filter: brightness(1.12); color: #FFFFFF; }
+[data-testid="stFormSubmitButton"] button p,
+.st-key-publish-results button p { color: #FFFFFF; font-weight: 800; }
+.st-key-retake button, [class*="st-key-refresh"] button {
+  border: 1px solid var(--line); border-radius: 999px; background: rgba(255, 255, 255, .85);
+  color: var(--navy); box-shadow: 0 12px 30px rgba(10, 10, 86, .07);
+}
+.st-key-retake button:hover, [class*="st-key-refresh"] button:hover {
+  border-color: rgba(144, 37, 193, .45); color: var(--deep-purple);
+}
+.st-key-retake button p, [class*="st-key-refresh"] button p { color: inherit; font-weight: 800; }
+/* 🔄 right-alignment is native now: app.py puts it in
+   st.container(horizontal=True, horizontal_alignment="distribute"/"right"). */
+
+/* ---- 7. Picker: quiz selectbox + "Active PRs only" toggle + inline 🔄 ---- */
+.st-key-picker-card {
+  border: 1px solid var(--line); border-radius: 22px; padding: 14px 16px;
+  background: rgba(255, 255, 255, .86); box-shadow: 0 16px 40px rgba(10, 10, 86, .08);
+}
+.st-key-picker-card [data-testid="stHorizontalBlock"] { align-items: center; }
+[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+  border-radius: 14px; border: 1px solid var(--line); background: #FFFFFF;
+}
+[data-testid="stCheckbox"] p { font-weight: 700; color: var(--navy); }
+
+/* ---- 8. Alerts + expanders ---- */
+[data-testid="stAlertContainer"] {
+  border: 1px solid var(--line); border-radius: 22px; padding: 18px 20px;
+  background: rgba(255, 255, 255, .90); box-shadow: 0 16px 40px rgba(10, 10, 86, .08);
+  color: var(--navy);
+}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]) {
+  border-color: rgba(144, 37, 193, .35);
+  background: linear-gradient(90deg, rgba(216, 42, 200, .08), rgba(255, 206, 0, .12), rgba(255, 255, 255, .90));
+}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"]) {
+  border-color: rgba(255, 118, 141, .50);
+  background: linear-gradient(90deg, rgba(255, 118, 141, .14), rgba(216, 42, 200, .08), rgba(255, 255, 255, .90));
+}
+[data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]) {
+  border-color: rgba(255, 206, 0, .55);
+  background: linear-gradient(90deg, rgba(255, 206, 0, .16), rgba(255, 118, 141, .08), rgba(255, 255, 255, .90));
+}
+[data-testid="stExpander"] details {
+  border: 1px solid var(--line); border-radius: 22px; background: rgba(255, 255, 255, .88);
+  box-shadow: 0 12px 30px rgba(10, 10, 86, .06); overflow: hidden;
+}
+[data-testid="stExpander"] summary { padding: 14px 18px; font-weight: 700; color: var(--navy); }
+[data-testid="stExpander"] summary:hover { background: rgba(216, 42, 200, .06); color: var(--deep-purple); }
+
+/* ---- 9. Small screens ---- */
+@media (max-width: 760px) {
+  [data-testid="stMainBlockContainer"] { padding: 4rem 14px 60px; }
+  .hero { padding: 22px; }
+  .verdict-card { padding: 24px; }
+  .meta-row { grid-template-columns: 1fr; }
+  .taker-chip { min-width: 0; }
+  .quiz-head { align-items: flex-start; flex-direction: column; }
+}

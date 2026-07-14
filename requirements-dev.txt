@@ -1,0 +1,11 @@
+# Exact-pinned development dependencies for the pr-quiz repo.
+# Used by CI (the test and zizmor jobs) and by local contributors. Version
+# bumps are manual and deliberate; hash-pinning via pip-compile is a later
+# upgrade (see RELEASING/CONTRIBUTING).
+pytest==9.1.1
+pyyaml==6.0.3
+streamlit==1.59.2
+requests==2.34.2
+databricks-sdk==0.120.0
+commitizen==4.16.4
+zizmor==1.27.0

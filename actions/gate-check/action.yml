@@ -1,0 +1,76 @@
+name: Quiz merge-gate check
+description: >
+  Evaluates the PR-quiz merge gate for a commit: passes when the latest
+  quiz_results row for the exact (provider, repo, head_sha) scored 100%.
+  Requires Python 3 and the Databricks CLI on PATH, plus Databricks auth in
+  the environment (e.g. DATABRICKS_HOST + DATABRICKS_CLIENT_ID +
+  DATABRICKS_CLIENT_SECRET for a service principal, or another
+  `databricks` CLI auth mechanism) - callers should run `databricks/setup-cli`
+  before this action. This action does not fail the job when the gate
+  blocks; check the `passed` output and fail your own step if you want that.
+  On infrastructure errors (warehouse/CLI failure) `passed` is "false" and
+  the verdict starts with "ERROR:" instead of "BLOCKED:".
+
+inputs:
+  sha:
+    description: Head commit SHA to evaluate.
+    required: true
+  repo:
+    description: Repository the commit belongs to, e.g. "owner/name" (github.repository).
+    required: true
+  provider:
+    description: SCM provider that produced the commit.
+    required: false
+    default: github
+  warehouse_id:
+    description: Databricks SQL warehouse ID to run the gate query against.
+    required: true
+  results_table:
+    description: Fully qualified quiz_results table name.
+    required: false
+    default: workspace.pr_quiz.quiz_results
+
+outputs:
+  verdict:
+    description: One-line pass/block reason (also used as a commit status description).
+    value: ${{ steps.gate.outputs.verdict }}
+  passed:
+    description: "'true' if the gate passed, 'false' if it blocked."
+    value: ${{ steps.gate.outputs.passed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Evaluate quiz gate
+      id: gate
+      shell: bash
+      # Inputs go through env vars, never inline ${{ }} interpolation in the
+      # script: a consumer passing an untrusted value (e.g. a branch-derived
+      # sha) must not be able to inject shell commands on their runner.
+      env:
+        SHA: ${{ inputs.sha }}
+        REPO: ${{ inputs.repo }}
+        PROVIDER: ${{ inputs.provider }}
+        WAREHOUSE_ID: ${{ inputs.warehouse_id }}
+        RESULTS_TABLE: ${{ inputs.results_table }}
+      run: |
+        set +e
+        verdict=$(python3 "${{ github.action_path }}/gate_check.py" \
+          --sha "$SHA" \
+          --repo "$REPO" \
+          --provider "$PROVIDER" \
+          --warehouse-id "$WAREHOUSE_ID" \
+          --table "$RESULTS_TABLE")
+        code=$?
+        set -e
+        echo "$verdict"
+        {
+          echo "verdict<<PRQUIZ_EOF"
+          echo "$verdict"
+          echo "PRQUIZ_EOF"
+        } >> "$GITHUB_OUTPUT"
+        if [ "$code" -eq 0 ]; then
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "passed=false" >> "$GITHUB_OUTPUT"
+        fi

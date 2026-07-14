@@ -1,0 +1,14 @@
+# Code owners for pr-quiz.
+#
+# Review from an owner is required on the consumer attack surface: anything an
+# adopter runs on their own runners (reusable + caller-template workflows, the
+# composite action) or executes against their workspace (the installer). A
+# change there can compromise every downstream repo, so it must not merge
+# without a maintainer's eyes. Enable "Require review from Code Owners" in
+# branch protection so this file is enforced rather than advisory. Replace
+# @brickmans with an org team handle once one exists.
+
+/.github/workflows/    @brickmans
+/actions/              @brickmans
+/templates/callers/    @brickmans
+/installer/            @brickmans

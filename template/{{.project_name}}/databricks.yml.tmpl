@@ -1,0 +1,40 @@
+bundle:
+  name: "{{.project_name}}"
+
+include:
+  - resources/*.yml
+
+# Substitutions are quoted so rendered values always stay YAML strings:
+# unquoted, an all-digit warehouse_id becomes an int (dropping leading
+# zeros) and values containing '#' or ': ' truncate or break the parse.
+variables:
+  catalog:
+    description: Unity Catalog catalog holding the quiz schema
+    default: "{{.catalog}}"
+  schema:
+    description: Schema holding quiz tables
+    default: "{{.schema}}"
+  warehouse_id:
+    description: SQL warehouse used by the quiz app
+    default: "{{.warehouse_id}}"
+  serving_endpoint:
+    description: Foundation-model endpoint used for question generation
+    default: "{{.serving_endpoint}}"
+  secret_scope:
+    description: Secret scope holding the GitHub token
+    default: "{{.secret_scope}}"
+  secret_key_github:
+    description: Secret key holding the GitHub token
+    default: "{{.secret_key_github}}"
+  app_name:
+    description: Databricks app name (lowercase letters, digits, hyphens)
+    default: "{{.project_name}}"
+  job_name:
+    description: Quiz-generation job name
+    default: "{{.project_name}}-generator"
+
+targets:
+  prod:
+    default: true
+    workspace:
+      host: "{{.workspace_host}}"

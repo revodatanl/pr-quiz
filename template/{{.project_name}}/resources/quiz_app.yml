@@ -1,0 +1,27 @@
+resources:
+  apps:
+    quiz_app:
+      name: ${var.app_name}
+      description: Merge-gate quiz for PR head commits
+      source_code_path: ../src/app
+      # QUIZ_SCHEMA / QUIZ_STATUS_CONTEXT are baked into src/app/app.yaml at
+      # `databricks bundle init` render time (app.yaml.tmpl), not injected as
+      # resource-level `config: env:` here: that injection proved unreliable
+      # (Databricks CLI #4901).
+      resources:
+        - name: sql-warehouse
+          description: Warehouse for quiz reads/writes
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+        - name: github-token
+          description: GitHub token for posting quiz-gate status + PR comments
+          secret:
+            scope: ${var.secret_scope}
+            key: ${var.secret_key_github}
+            permission: READ
+        - name: llm-endpoint
+          description: Model endpoint for wrong-answer explanations
+          serving_endpoint:
+            name: ${var.serving_endpoint}
+            permission: CAN_QUERY
