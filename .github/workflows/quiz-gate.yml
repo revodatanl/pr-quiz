@@ -1,165 +1,43 @@
-name: quiz-gate (reusable)
-
-# Reusable workflow - not triggered directly. Call it from a thin caller
-# workflow (copy templates/callers/quiz-gate.yml; this repo dogfoods via
-# .github/workflows/caller-quiz-gate.yml). The caller owns the event triggers
-# (issue_comment for /quiz-check, workflow_dispatch for manual re-evaluation)
-# and must grant the permissions declared below. Inside this workflow,
-# github.event.* is the CALLER's triggering event.
+# PR-quiz caller: re-evaluates the merge gate on a /quiz-check comment or a
+# manual dispatch. Copy this file to .github/workflows/quiz-gate.yml in your
+# repo, then:
+#
+#   1. Replace OWNER/REPO in `uses:` below and PIN it to a released tag or
+#      commit SHA (e.g. @v1) - never a moving branch.
+#   2. Set repo secrets: DATABRICKS_HOST, DATABRICKS_CLIENT_ID,
+#      DATABRICKS_CLIENT_SECRET (a service principal that can query the
+#      results warehouse).
+#   3. Set repo variable QUIZ_WAREHOUSE_ID (required). Optional variables
+#      (defaults shown below): QUIZ_RESULTS_TABLE, QUIZ_STATUS_CONTEXT.
+#
+# Note: issue_comment workflows only run the version on your DEFAULT branch -
+# /quiz-check does nothing until this file is merged there.
+name: quiz-gate
 
 on:
-  workflow_call:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
     inputs:
-      warehouse_id:
-        description: Databricks SQL warehouse ID the gate query runs against.
-        type: string
-        required: true
-      results_table:
-        description: Fully qualified quiz_results table name.
-        type: string
-        default: workspace.pr_quiz.quiz_results
-      status_context:
-        description: Commit-status context used for the merge gate.
-        type: string
-        default: quiz-gate
       pr_number:
-        description: >
-          PR number to re-evaluate. Only used on workflow_dispatch - pass the
-          caller's dispatch input through; comment events resolve the PR from
-          the comment itself.
-        type: string
-        default: ''
-      allowed_associations:
-        description: >
-          Author associations allowed to trigger a re-check via a /quiz-check
-          comment. Comma-separated, uppercase, no spaces
-          (e.g. "OWNER,MEMBER,COLLABORATOR").
-        type: string
-        default: OWNER,MEMBER,COLLABORATOR
-    secrets:
-      databricks_host:
-        description: Databricks workspace URL.
-        required: true
-      databricks_client_id:
-        description: Service-principal OAuth client id.
-        required: true
-      databricks_client_secret:
-        description: Service-principal OAuth client secret.
+        description: PR number to re-evaluate
         required: true
 
-# Required caller permissions (deliberately NOT declared here: a called
-# workflow requesting more than the caller's token can grant fails the call
-# instead of skipping cleanly, e.g. on events with a downgraded token):
-#   pull-requests: read, statuses: write
-# The caller templates carry exactly this block.
+permissions:
+  pull-requests: read
+  statuses: write
 
 jobs:
-  # /quiz-check is gated on comment author_association exactly like /quiz in
-  # quiz-generate (padded-token match so e.g. NONE can never substring-match
-  # into the allowed list) - on a public repo an ungated comment trigger is a
-  # denial-of-wallet vector.
-  gate:
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request &&
-       startsWith(github.event.comment.body, '/quiz-check') &&
-       contains(format(',{0},', inputs.allowed_associations),
-                format(',{0},', github.event.comment.author_association)))
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # Comment spam must not fan out parallel gate runs: one running + at most
-    # one queued run per PR (older queued runs are superseded).
-    concurrency:
-      group: quiz-gate-${{ github.repository }}-${{ github.event.issue.number || inputs.pr_number }}
-      cancel-in-progress: false
-    env:
-      DATABRICKS_HOST: ${{ secrets.databricks_host }}
-      DATABRICKS_CLIENT_ID: ${{ secrets.databricks_client_id }}
-      DATABRICKS_CLIENT_SECRET: ${{ secrets.databricks_client_secret }}
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      # `required: true` only checks that the input is PROVIDED - a caller
-      # wiring an unset repo variable passes '' straight through and dies
-      # later with a cryptic Databricks error. Fail fast with the actual fix.
-      - name: Validate warehouse_id input
-        env:
-          WAREHOUSE_ID: ${{ inputs.warehouse_id }}
-        run: |
-          if [ -z "$WAREHOUSE_ID" ]; then
-            echo "::error::warehouse_id input is empty - set the QUIZ_WAREHOUSE_ID repo variable (or pass warehouse_id explicitly) in the caller workflow."
-            exit 1
-          fi
-
-      - name: Install Databricks CLI
-        # SHA-pinned (tags are mutable; a moved tag must not change what runs
-        # on adopters' runners). Bump deliberately at release time.
-        uses: databricks/setup-cli@bc7e6aabb6006d8d1758bd25ee1a100935c9cb7c # v1.7.0
-
-      # Event-derived values go through env, never inline ${{ }} inside run
-      # scripts (shell-injection hardening; same rule for every step).
-      - name: Resolve PR head SHA
-        id: pr
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          PR_NUMBER_INPUT: ${{ inputs.pr_number }}
-          REPO: ${{ github.repository }}
-        run: |
-          case "$EVENT_NAME" in
-            issue_comment) pr=$ISSUE_NUMBER;;
-            *)             pr=$PR_NUMBER_INPUT;;  # workflow_dispatch passthrough
-          esac
-          case "$pr" in
-            ''|*[!0-9]*) echo "::error::pr_number must be a PR number, got '$pr'."; exit 1;;
-          esac
-          sha=$(gh pr view "$pr" --repo "$REPO" --json headRefOid --jq .headRefOid)
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-
-      - name: Evaluate merge gate against quiz results
-        id: gate
-        # Remote form on purpose: a `./actions/gate-check` path inside a
-        # reusable workflow would resolve against the CALLER's repository and
-        # break for every consumer. The remote form works for this repo's own
-        # dogfood callers too.
-        # Pinned to a version tag, never a moving branch: this ref resolves at
-        # runtime independent of the consumer's @v1 workflow pin, so a moving
-        # branch here would hand anyone who can push to this repo's default
-        # branch control of every adopter's gate step - with the DATABRICKS_*
-        # secrets in scope. `cz bump` (version_files in .cz.toml) rewrites this
-        # pin in lock-step with each release tag, and the CI release-gate blocks
-        # a tag whenever it is left unpinned.
-        uses: revodatanl/pr-quiz/actions/gate-check@v1.0.0
-        with:
-          sha: ${{ steps.pr.outputs.sha }}
-          repo: ${{ github.repository }}
-          warehouse_id: ${{ inputs.warehouse_id }}
-          results_table: ${{ inputs.results_table }}
-
-      - name: Publish quiz-gate commit status
-        env:
-          REPO: ${{ github.repository }}
-          SHA: ${{ steps.pr.outputs.sha }}
-          STATUS_CONTEXT: ${{ inputs.status_context }}
-          PASSED: ${{ steps.gate.outputs.passed }}
-          VERDICT: ${{ steps.gate.outputs.verdict }}
-        run: |
-          # An ERROR verdict is an infra/config failure, not a blocked gate
-          # (gate_check.py prefixes it "ERROR:"); publish state=error to match
-          # quiz-generate's error path rather than a plain failure.
-          if [ "$PASSED" = "true" ]; then
-            state=success
-          elif [ "${VERDICT#ERROR}" != "$VERDICT" ]; then
-            state=error
-          else
-            state=failure
-          fi
-          gh api "repos/$REPO/statuses/$SHA" \
-            -f state="$state" -f context="$STATUS_CONTEXT" \
-            -f description="$VERDICT"
-          # Fail the run when the gate is not green (deliberate: a blocked
-          # re-check should be loud). Trade-off: comment/dispatch runs report
-          # against the DEFAULT-BRANCH head commit (GITHUB_SHA), so the
-          # default branch's tip shows a red X until a newer commit lands.
-          # The check never attaches to the PR head, so PR checks stay clean.
-          [ "$state" = "success" ]
+  quiz-gate:
+    uses: revodatanl/pr-quiz/.github/workflows/quiz-gate.yml@v1
+    with:
+      warehouse_id: ${{ vars.QUIZ_WAREHOUSE_ID }}
+      # `|| 'x'` keeps an unset variable from overriding the reusable
+      # workflow's default with an empty string.
+      results_table: ${{ vars.QUIZ_RESULTS_TABLE || 'workspace.pr_quiz.quiz_results' }}
+      status_context: ${{ vars.QUIZ_STATUS_CONTEXT || 'quiz-gate' }}
+      pr_number: ${{ inputs.pr_number }}
+    secrets:
+      databricks_host: ${{ secrets.DATABRICKS_HOST }}
+      databricks_client_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
+      databricks_client_secret: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
