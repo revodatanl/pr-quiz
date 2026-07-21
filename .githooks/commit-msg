@@ -1,0 +1,7 @@
+#!/bin/sh
+# Reject commit messages that credit Claude as a co-author.
+# commit-msg hook: $1 is the path to the file holding the commit message.
+if grep -qi 'Co-Authored-By: Claude' "$1"; then
+	echo "commit-msg: 'Co-Authored-By: Claude' trailer is not allowed in commit messages." >&2
+	exit 1
+fi

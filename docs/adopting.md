@@ -11,20 +11,57 @@ ask your backend operator for the handoff file.
 
 ## Prerequisites
 
-See [README Prerequisites](../README.md#prerequisites) for the full list across
-both roles. As the repo maintainer you need:
+Two roles set up pr-quiz. The **backend operator** deploys the Databricks side
+once per workspace (see [operating.md](operating.md)). The **repo
+maintainer** — the role this guide is for — wires each GitHub repo to that
+backend.
 
-- Admin on the GitHub repo, to add secrets/variables and branch protection.
-- The [GitHub CLI](https://cli.github.com/) (`gh`) on your `PATH`.
-- The backend handoff file `pr-quiz-backend.json` from your backend operator.
-- Databricks credentials for the CI service principal, stored as repo secrets:
-  `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`.
+| Requirement | Backend operator | Repo maintainer |
+| --- | --- | --- |
+| Unity Catalog workspace | Yes | — |
+| Serverless jobs enabled | Yes | — |
+| An existing SQL warehouse | Yes | — |
+| A foundation-model serving endpoint in the region | Yes | — |
+| Rights to create a service principal | Yes | — |
+| [Databricks CLI](https://docs.databricks.com/dev-tools/cli/) | Yes | — |
+| Python 3.10+ | Yes | Yes |
+| Admin on the target GitHub repo | — | Yes |
+| [GitHub CLI](https://cli.github.com/) (`gh`) | — | Yes |
+| `pr-quiz-backend.json` handoff file | — | Yes |
+
+A few terms above:
+
+- **SQL warehouse** — a Databricks SQL compute resource. The gate query and
+  the app's grading queries run on one.
+- **Serverless jobs** — Databricks jobs that run on compute Databricks manages
+  for you, with nothing to provision.
+- **Serving endpoint** — the hosted foundation model (a large, general-purpose
+  pretrained AI model) the job calls to write quiz questions. The default is
+  `databricks-gpt-oss-120b`; it may not exist in every workspace or region, so
+  set `serving_endpoint` to one that does.
+- **Service principal** — a non-interactive machine identity. CI uses one to
+  authenticate to Databricks with no human in the loop.
+- **Unity Catalog** — Databricks' governance layer for data and permissions. If
+  your workspace lists a catalog under **Catalog** in the sidebar, it
+  qualifies.
+- **Reusable workflow** — a shared GitHub Actions workflow that other repos
+  call. pr-quiz ships two. A **caller workflow** is the small workflow in your
+  repo that calls them; you own and edit it.
+
+The handoff file carries the workspace host, warehouse ID, app/job names,
+results table, status context, and the CI service-principal client ID — get
+it from your backend operator. You'll also need repo secrets for the CI
+service principal — see [Configuration reference](#configuration-reference)
+below.
 
 ## Installer walkthrough
 
-The guided installer is a single stdlib-only file. Every step is idempotent
-(re-runs report `[skip]`), `--dry-run` prints the mutating commands without
-running them, and nothing runs branch-protection changes you didn't ask for.
+The guided installer is a single Python file that uses only the standard
+library — no packages to install. Every step is **idempotent**: safe to run
+more than once, because a re-run detects work already done and reports
+`[skip]` instead of repeating it. `--dry-run` prints the mutating commands
+without running them, and nothing runs branch-protection changes you didn't
+ask for.
 
 ```bash
 # 1. Preflight: CLIs on PATH, auth working.
@@ -51,8 +88,10 @@ Run any subcommand with `--help` for the full list.
 ## The one gotcha that catches everyone
 
 **`/quiz` does nothing until the caller workflow is merged to your default
-branch.** GitHub runs `issue_comment` workflows only from the version on the
-repository's default branch. The onboarding PR adds the caller workflow, but
+branch.** GitHub only runs workflows triggered by `issue_comment` (the event
+a PR/issue comment fires) from the version of the workflow file on the
+repository's default branch — never from a PR's own branch. The onboarding
+PR adds the caller workflow, but
 until that PR merges, commenting `/quiz` on any PR is silently ignored. Merge
 the onboarding PR first, then use `/quiz`. This is why `--protect-only` exists:
 turn on the required status only once the workflow is live.
@@ -65,41 +104,113 @@ Two related points:
 - The quiz app sleeps when idle and takes about 2 minutes to wake. The `/quiz`
   workflow pre-starts it, but the first load after idle is slow.
 
+## Topologies
+
+- **Shared multi-tenant backend** (recommended for an org). Deploy the backend
+  once; many repos point their caller workflows at it. Quiz results are keyed by
+  `(provider, repo, head_sha)` — `provider` identifies the code-hosting
+  platform, e.g. GitHub — so repos sharing a `head_sha` never cross results.
+  One CI service principal and one warehouse serve all repos — one place to
+  rotate secrets, one cost center.
+- **Per-team bundle init.** A **bundle** is Databricks' packaged unit of
+  deploy — config plus code for a job, an app, and their resources. A team
+  runs `databricks bundle init` from this template into their own workspace
+  and owns an isolated backend. Use this when teams need separate workspaces,
+  catalogs, or cost isolation. Each backend is operated independently per
+  [operating.md](operating.md).
+
+## Configuration reference
+
+The consumer caller workflows read these. Defaults come from the reusable
+workflow, so most are optional. `quiz-gate` itself is a **commit status** —
+GitHub's per-commit pass/fail marker that a PR's branch-protection rule can
+require before allowing merge.
+
+**Repo secrets** (required): OAuth credentials that let the CI service
+principal — see [Prerequisites](#prerequisites) — authenticate to Databricks
+without a human signing in.
+
+| Secret | Purpose |
+| --- | --- |
+| `DATABRICKS_HOST` | Workspace URL the CI service principal authenticates to |
+| `DATABRICKS_CLIENT_ID` | CI service-principal OAuth client id |
+| `DATABRICKS_CLIENT_SECRET` | CI service-principal OAuth secret (expires — rotate) |
+
+**Repo variables**:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `QUIZ_WAREHOUSE_ID` | *(required for the gate)* | SQL warehouse the gate query runs on |
+| `QUIZ_APP_NAME` | `pr-quiz` | Name of the Databricks App (a Databricks-hosted web app; here, the Streamlit quiz UI) that serves the quiz |
+| `QUIZ_JOB_NAME` | `pr-quiz-generator` | Generation job |
+| `QUIZ_RESULTS_TABLE` | `workspace.pr_quiz.quiz_results` | Fully qualified quiz_results table the gate reads; override when the backend uses a non-default catalog or schema, or the gate query fails with `TABLE_OR_VIEW_NOT_FOUND` |
+| `QUIZ_STATUS_CONTEXT` | `quiz-gate` | Commit-status name the gate uses |
+| `QUIZ_TARGET_BRANCH` | *(caller default)* | Base branch `/quiz` will generate for; keep in sync with `branches:` |
+| `QUIZ_WAIVE_AUTHORS` | `dependabot[bot]` | Comma-separated PR author logins (no spaces) whose PRs bypass the quiz with an automatic passing status (for automated dependency bots) |
+
+**Backend secret** (Databricks side): a GitHub token in the workspace secret
+scope (default key `github_token`) that the generation job uses to read PR
+diffs and post statuses.
+
+The Databricks-side deployment parameters (workspace host, catalog, schema,
+warehouse ID, serving endpoint, secret scope/key, commit-status context) are
+the `databricks bundle init` template inputs in
+[../databricks_template_schema.json](../databricks_template_schema.json).
+
 ## Manual fallback
 
 If you'd rather not run the installer, wire the repo by hand:
 
 1. Copy `templates/callers/quiz-generate.yml` and
    `templates/callers/quiz-gate.yml` into your repo's `.github/workflows/`.
-2. In each, replace `OWNER/REPO` in the `uses:` line with the public
-   pr-quiz repo and pin it to `@v1` (or a commit SHA) — never a moving branch.
-3. Adjust the `branches:` filter and `QUIZ_TARGET_BRANCH` to the branch you
-   protect.
-4. Add repo **secrets**: `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`,
-   `DATABRICKS_CLIENT_SECRET`.
-5. Add repo **variable** `QUIZ_WAREHOUSE_ID` (required by the gate caller), plus
-   any optional overrides (`QUIZ_APP_NAME`, `QUIZ_JOB_NAME`,
-   `QUIZ_RESULTS_TABLE`, `QUIZ_STATUS_CONTEXT`, `QUIZ_TARGET_BRANCH`, and
-   `QUIZ_WAIVE_AUTHORS` — comma-separated author logins, no spaces, whose PRs
-   bypass the quiz; default `dependabot[bot]`).
-   `QUIZ_RESULTS_TABLE` defaults to `workspace.pr_quiz.quiz_results` — set it
-   whenever the backend was deployed with a non-default catalog or schema, or
-   the gate query fails with `TABLE_OR_VIEW_NOT_FOUND`.
-6. Merge those workflows to your default branch.
-7. Enable branch protection on the protected branch requiring the `quiz-gate`
+2. In each, replace `OWNER/REPO` in the `uses:` line with `revodatanl/pr-quiz`
+   (the public pr-quiz repo) and pin it to `@v1` (or a commit SHA) — never a
+   moving branch.
+3. Set the `branches:` filter and `QUIZ_TARGET_BRANCH` to the branch you
+   protect (see the note above).
+4. Add the repo secrets and variables listed in [Configuration
+   reference](#configuration-reference) above.
+5. Merge those workflows to your default branch.
+6. Enable branch protection on the protected branch requiring the `quiz-gate`
    status check.
+
+## Limits and gotchas
+
+- The model-serving endpoint is a bundle deployment variable — swap it
+  without any code changes.
+- Question quality depends on the model. Malformed output is dropped and
+  retried, and generation over-provisions rounds (it requests more questions
+  than needed, expecting some to fail); a run fails only if fewer valid
+  questions than needed remain after all rounds.
+- PRs at roughly 4,000+ changed lines skip the difficulty judge (the model
+  call that rates how hard a diff is to review and scales the question count;
+  skipping it is safe here because diff size alone already caps the count at
+  20). Diffs split into at most 5 chunks of up to 30,000 characters; files
+  that don't fit are skipped for question generation but still count toward
+  the diff size.
+
+See [Troubleshooting](#troubleshooting) below for the latest-result-wins and
+fork-PR behaviors.
 
 ## Troubleshooting
 
-- **`/quiz` is ignored.** The caller workflow isn't on your default branch yet
-  (merge it), or your comment's author association isn't in the allowed list
-  (`OWNER,MEMBER,COLLABORATOR` by default).
+- **`/quiz` is ignored.** See [the gotcha above](#the-one-gotcha-that-catches-everyone) —
+  most likely the caller workflow isn't on your default branch yet — or your
+  commenter's **author association** (GitHub's label for their relationship
+  to the repo, e.g. `OWNER`, `MEMBER`, `COLLABORATOR`) isn't in the allowed
+  list (`OWNER,MEMBER,COLLABORATOR` by default).
 - **Gate step fails with an empty/cryptic Databricks error.** `QUIZ_WAREHOUSE_ID`
   is unset — the gate caller validates it and tells you to set the variable.
 - **"Could not resolve the quiz app URL".** The `app_name` input doesn't match a
   deployed app, or the CLI can't see it; pass `app_url` explicitly.
-- **Quiz link 404s or hangs.** The app was asleep; wait ~2 minutes and reload.
-- **Fork PRs never get a quiz automatically.** By design — a maintainer must
-  post `/quiz`. See [SECURITY.md](../SECURITY.md).
+- **Quiz link 404s or hangs.** The app was asleep (see the wake-up note
+  above); wait ~2 minutes and reload.
+- **Fork PRs never get a quiz automatically.** GitHub withholds secrets from
+  fork-triggered workflows, so a maintainer must post `/quiz` instead. See
+  [SECURITY.md](../SECURITY.md).
 - **Passing then failing.** The gate reads the **latest** result per commit; a
-  later failing attempt re-blocks. Retake to 100%.
+  passing attempt followed by a failing one blocks the merge again. Retake to
+  100%.
+- **Need to re-check the gate without a new commit or a new quiz.** Comment
+  `/quiz-check` — it re-evaluates `quiz-gate` against the existing quiz
+  result for the head commit, without regenerating questions.
