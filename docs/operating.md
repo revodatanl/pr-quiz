@@ -22,8 +22,8 @@ One backend serves the quiz for every repo that points at it. It consists of:
   job and manage the app.
 
 Before deploying, check the backend-operator column in
-[README Prerequisites](../README.md#prerequisites) for the workspace rights and
-tools you need.
+[adopting.md Prerequisites](adopting.md#prerequisites) for the workspace
+rights and tools you need.
 
 ## Deploying
 
