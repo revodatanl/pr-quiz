@@ -8,4 +8,4 @@ streamlit==1.59.2
 requests==2.34.2
 databricks-sdk==0.121.0
 commitizen==4.16.5
-zizmor==1.27.0
+zizmor==1.29.0
