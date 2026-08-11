@@ -4,7 +4,7 @@
 # upgrade (see RELEASING/CONTRIBUTING).
 pytest==9.1.1
 pyyaml==6.0.3
-streamlit==1.59.2
+streamlit==1.61.1
 requests==2.34.2
 databricks-sdk==0.125.0
 commitizen==4.17.0
