@@ -139,7 +139,7 @@ jobs:
       - name: Install Databricks CLI
         # SHA-pinned (tags are mutable; a moved tag must not change what runs
         # on adopters' runners). Bump deliberately at release time.
-        uses: databricks/setup-cli@dd60b7b133203edca3e8f08b1e053c43a979296e # v1.8.0
+        uses: databricks/setup-cli@60b64e3937ee15f5a8b914664d1e78a586a9a4da # v1.11.0
 
       # All event-derived values go through env, never inline ${{ }} inside
       # run scripts (shell-injection hardening; same rule for every step).
