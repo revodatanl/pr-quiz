@@ -45,8 +45,11 @@ fallbacks, and troubleshooting.
    `quiz-gate` status to pending, wakes the quiz app, and starts a Databricks
    job. Waived authors (`QUIZ_WAIVE_AUTHORS`) skip straight to a passing
    status.
-2. The job reads the diff and writes a pool of questions, sized to the diff,
-   to a Databricks table.
+2. The job reads the diff and writes a pool of questions, sized to the
+   reviewable part of the diff, to a Databricks table. Generated files
+   (lockfiles, minified bundles, vendored code) are skipped, and a deleted file
+   is only ever worth one question about the consequences of removing it — see
+   [Skipped files](docs/adopting.md#skipped-files).
 3. A bot comment links the quiz. Each attempt samples fresh questions and is
    graded instantly.
 

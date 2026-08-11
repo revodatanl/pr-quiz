@@ -32,6 +32,10 @@ variables:
   job_name:
     description: Quiz-generation job name
     default: "{{.project_name}}-generator"
+  status_context:
+    description: Commit-status context the merge gate keys off (the job waives it
+      when a PR has nothing quizzable); must match the callers' QUIZ_STATUS_CONTEXT
+    default: "{{.status_context}}"
 
 targets:
   prod:

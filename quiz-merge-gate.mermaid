@@ -21,11 +21,18 @@ flowchart TB
     %%   regenerates for the latest commit (e.g. after new commits).
     %%   New commits (synchronize) set the gate PENDING via mark-stale.
     %%   A /quiz-check comment re-evaluates the gate on demand.
-    %% - Question count N scales with PR size AND AI-judged
-    %%   difficulty (factor 0.2 – 5.0): N = size × difficulty,
-    %%   clamped 1 – 20. Very large diffs skip the judge (max N
-    %%   guaranteed). The AI generates at least 5 × N questions,
-    %%   prompted per diff chunk, so repeat attempts rotate questions.
+    %% - Only REVIEWABLE changes are quizzed. Generated files
+    %%   (lock files, minified bundles, vendored trees, codegen)
+    %%   are dropped entirely, and a deleted file is quizzed only
+    %%   on the consequences of removing it — neither adds to the
+    %%   size N is computed from. A PR with nothing quizzable left
+    %%   WAIVES the gate rather than failing it.
+    %% - Question count N scales with reviewable PR size AND
+    %%   AI-judged difficulty (factor 0.2 – 5.0): N = size ×
+    %%   difficulty, clamped 1 – 20. Very large diffs skip the judge
+    %%   (max N guaranteed). The AI generates at least 5 × N
+    %%   questions, prompted per diff chunk, so repeat attempts
+    %%   rotate questions.
 
     %% CROSS-SUBGRAPH RULE:
     %% Cross-subgraph edges connect modules at SAME nesting
@@ -53,7 +60,10 @@ flowchart TB
         NewCommitCheck{"Event = new commit<br>(synchronize)?"}
         MarkStalePending["mark-stale: set gate pending<br>on new head SHA"]
         SetGatePending["Set gate status pending<br>(quiz being generated)"]
-        AnalyzeDiffSize["Analyze PR diff size"]
+        FilterUnreviewable["Drop generated files (built-in list,<br>.gitattributes, configured globs);<br>deleted files → impact only, zero size"]
+        QuizzableCheck{"Anything<br>reviewable left?"}
+        WaiveNoContent(["Post passing gate status<br>(waived — nothing reviewable)"])
+        AnalyzeDiffSize["Analyze reviewable diff size"]
         JudgeSkipCheck{"Diff ≥ ~4000<br>changed lines?"}
         JudgeDifficulty["AI judges diff difficulty<br>(factor 0.2 – 5.0)"]
         ComputeQuestionCount["Compute question count N<br>(size × difficulty → 1 – 20)"]
@@ -99,7 +109,10 @@ flowchart TB
         WaiveAuthorCheck -->|"No — human PR"| NewCommitCheck
         NewCommitCheck -->|"Yes — new commit"| MarkStalePending
         NewCommitCheck -->|"No — open/reopen or /quiz"| SetGatePending
-        SetGatePending --> AnalyzeDiffSize
+        SetGatePending --> FilterUnreviewable
+        FilterUnreviewable --> QuizzableCheck
+        QuizzableCheck -->|"No — all generated,<br>binary or undiffable"| WaiveNoContent
+        QuizzableCheck -->|"Yes"| AnalyzeDiffSize
         AnalyzeDiffSize --> JudgeSkipCheck
         JudgeSkipCheck -->|"No"| JudgeDifficulty
         JudgeSkipCheck -->|"Yes — max N guaranteed,<br>neutral factor"| ComputeQuestionCount
@@ -124,7 +137,7 @@ flowchart TB
 
     %% Cross-module flow
     PullRequestFlow -->|"open/reopen, /quiz, or synchronize"| QuizGeneration
-    QuizGeneration -.->|"bot waiver → passing status"| MergeGateCI
+    QuizGeneration -.->|"waiver (bot author, or nothing<br>reviewable) → passing status"| MergeGateCI
     QuizWebApp -.->|"posts commit status per attempt"| MergeGateCI
     PullRequestFlow -.->|"/quiz-check re-evaluates gate"| MergeGateCI
     %% Two-way dotted: gate reports blocked, developer reacts
@@ -185,13 +198,15 @@ flowchart TB
     %% SECTION 5: CLASS ASSIGNMENTS (group by type, not subgraph)
 
     class OpenReopenPR,PushCommits function
-    class SetGatePending,MarkStalePending,AnalyzeDiffSize,JudgeDifficulty,ComputeQuestionCount,GenerateQuestions,PostQuizLink function
+    class SetGatePending,MarkStalePending,FilterUnreviewable,AnalyzeDiffSize function
+    class JudgeDifficulty,ComputeQuestionCount,GenerateQuestions,PostQuizLink function
     class ServeRotatedQuestions,SubmitAttempt,GradeAttempt,PostPassComment function
     class ReadLatestResult,legendStep function
 
-    class CommentQuiz,CommentQuizCheck,WaiveGate,QuizPassed,legendTrigger trigger
+    class CommentQuiz,CommentQuizCheck,WaiveGate,WaiveNoContent,QuizPassed,legendTrigger trigger
     class QuestionPool,QuizResults,MainBranch,legendStore store
-    class WaiveAuthorCheck,NewCommitCheck,ScoreCheck,CommitMatchCheck,PerfectScoreCheck,JudgeSkipCheck,legendDecision decision
+    class WaiveAuthorCheck,NewCommitCheck,ScoreCheck,CommitMatchCheck,PerfectScoreCheck,JudgeSkipCheck decision
+    class QuizzableCheck,legendDecision decision
     class AllowMerge,legendSuccess success
     class BlockMerge,legendError error
     class Developer,TeamMember,legendActor actor

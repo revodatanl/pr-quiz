@@ -98,7 +98,10 @@ Edition, the Serverless Starter Warehouse). Cost is driven by how often quizzes
 are generated and taken, and by the warehouse auto-stop setting. Keep auto-stop
 short. Question generation runs on serverless job compute and calls a
 foundation-model endpoint; large diffs generate more questions and more model
-calls (capped at 20 questions and 5 diff chunks).
+calls (capped at 20 questions and 5 diff chunks). Generated files and the
+contents of deleted files are excluded from the question count, so a PR that is
+mostly lockfile churn costs far less than its line count suggests — see
+[Skipped files](adopting.md#skipped-files).
 
 ## Teardown
 

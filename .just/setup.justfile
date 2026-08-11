@@ -3,10 +3,13 @@
 secret_scope := if have_dev_config == "true" { `python -c "import json; print(json.load(open('.dev/init-config.json'))['secret_scope'])"` } else { "pr-quiz" }
 secret_key_github := "github_token"
 
-# Regenerate .just/shell.justfile for this platform
+# Regenerate .just/shell.justfile for this platform and enable the repo git hooks
 [script]
 [group: 'setup']
 bootstrap:
+  # .githooks ships commit-msg but git ignores it until hooksPath points there
+  git config core.hooksPath .githooks;
+  echo "enabled .githooks";
   mkdir -p .just;
   if [ "{{os_family()}}" = "windows" ]; then
     bash_path="C:/Program Files/Git/bin/bash.exe";

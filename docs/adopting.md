@@ -146,7 +146,8 @@ without a human signing in.
 | `QUIZ_RESULTS_TABLE` | `workspace.pr_quiz.quiz_results` | Fully qualified quiz_results table the gate reads; override when the backend uses a non-default catalog or schema, or the gate query fails with `TABLE_OR_VIEW_NOT_FOUND` |
 | `QUIZ_STATUS_CONTEXT` | `quiz-gate` | Commit-status name the gate uses |
 | `QUIZ_TARGET_BRANCH` | *(caller default)* | Base branch `/quiz` will generate for; keep in sync with `branches:` |
-| `QUIZ_WAIVE_AUTHORS` | `dependabot[bot]` | Comma-separated PR author logins (no spaces) whose PRs bypass the quiz with an automatic passing status (for automated dependency bots) |
+| `QUIZ_WAIVE_AUTHORS` | `dependabot[bot]` | Comma-separated PR author logins (no spaces) whose PRs bypass the quiz with an automatic passing status (for automated dependency bots). Used by **both** caller workflows — quiz-generate skips generation, quiz-gate keeps `/quiz-check` from blocking those PRs |
+| `QUIZ_GENERATED_GLOBS` | *(empty)* | Comma-separated path patterns for machine-generated files to skip, on top of the built-in list and your `.gitattributes` — e.g. `dist/*,*.pb.h`. See [Skipped files](#skipped-files) |
 
 **Backend secret** (Databricks side): a GitHub token in the workspace secret
 scope (default key `github_token`) that the generation job uses to read PR
@@ -174,23 +175,50 @@ If you'd rather not run the installer, wire the repo by hand:
 6. Enable branch protection on the protected branch requiring the `quiz-gate`
    status check.
 
+## Skipped files
+
+The quiz only covers changes a reviewer is expected to read. Three consequences:
+
+- **Generated files are skipped**, and don't count toward the question count. A
+  4,000-line lockfile next to a 6-line code change gives you a quiz about the 6
+  lines. Same for binary files and any diff GitHub declines to show.
+- **A deleted file is worth one question**, about the consequences of removing
+  it, answered from the code that remains. Its removed lines don't count either,
+  so a delete-only PR gets a 1-question quiz.
+- **A PR with nothing left to quiz passes automatically**, with a `quiz-gate`
+  status reading "Quiz waived: no reviewable changes in this PR" and no quiz
+  link. Otherwise a PR that only bumps `uv.lock` could never merge. Two things
+  block that waive: a PR editing `.gitattributes`, and a file GitHub returns no
+  diff for despite real changed lines. Both fail the run instead, so neither
+  becomes a way past the gate.
+
+A file counts as generated if it matches the built-in list (lock files, minified
+bundles, source maps, test snapshots, codegen output, `vendor/`,
+`node_modules/`), if your `.gitattributes` marks it `linguist-generated`, or if
+it matches `QUIZ_GENERATED_GLOBS`. Patterns apply at any depth and ignore case,
+so `dist/*` also covers `web/dist/app.js`.
+
+To add your own:
+
+```gitattributes
+# .gitattributes - also makes GitHub collapse the file
+src/api/schema.json linguist-generated=true
+```
+
 ## Limits and gotchas
 
-- The model-serving endpoint is a bundle deployment variable — swap it
-  without any code changes.
 - Question quality depends on the model. Malformed output is dropped and
   retried, and generation over-provisions rounds (it requests more questions
   than needed, expecting some to fail); a run fails only if fewer valid
   questions than needed remain after all rounds.
-- PRs at roughly 4,000+ changed lines skip the difficulty judge (the model
-  call that rates how hard a diff is to review and scales the question count;
-  skipping it is safe here because diff size alone already caps the count at
-  20). Diffs split into at most 5 chunks of up to 30,000 characters; files
-  that don't fit are skipped for question generation but still count toward
-  the diff size.
-
-See [Troubleshooting](#troubleshooting) below for the latest-result-wins and
-fork-PR behaviors.
+- **A very large PR is only partly quizzed.** The diff is split into at most 5
+  chunks of 30,000 characters, so roughly 150,000 characters reach the model;
+  anything past that is dropped but still counts toward the question count. A
+  single file whose diff GitHub refuses to return cannot be quizzed at all — the
+  job logs it as a warning.
+- PRs at roughly 4,000+ changed lines skip the difficulty judge — the model call
+  that rates how hard a diff is to review and scales the question count.
+  Skipping it is safe because diff size alone already caps the count at 20.
 
 ## Troubleshooting
 
@@ -214,3 +242,13 @@ fork-PR behaviors.
 - **Need to re-check the gate without a new commit or a new quiz.** Comment
   `/quiz-check` — it re-evaluates `quiz-gate` against the existing quiz
   result for the head commit, without regenerating questions.
+- **The gate went green with no quiz.** The PR was waived — the status
+  description says which kind: "no reviewable changes in this PR" (see [Skipped
+  files](#skipped-files)) or "automated dependency update"
+  (`QUIZ_WAIVE_AUTHORS`). `/quiz-check` re-confirms either one.
+- **The quiz is shorter than the diff suggests.** Either the difficulty judge
+  rated the diff easy, or part of it was skipped — see [Skipped
+  files](#skipped-files).
+- **Set `QUIZ_WAIVE_AUTHORS` on both caller workflows.** The gate caller applies
+  the author waive too; setting it only on the generate caller leaves
+  `/quiz-check` blocking bot PRs.

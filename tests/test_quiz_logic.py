@@ -4,6 +4,7 @@ import json
 import pytest
 
 from quiz_logic import (
+    DELETED_BLOCK_HEADER,
     MAX_QUESTIONS,
     MIN_DIFFICULTY_FACTOR,
     OPTIONS_PER_QUESTION,
@@ -14,9 +15,17 @@ from quiz_logic import (
     clamp_difficulty,
     compute_question_count,
     dedupe_questions,
+    deleted_file_text,
+    deletion_block,
+    deletion_references,
     extract_text,
+    is_generated_path,
     is_valid_repo,
     normalize_text,
+    parse_gitattributes_generated,
+    parse_glob_list,
+    prepare_files,
+    waive_blockers,
     parse_ambiguity_verdicts,
     parse_difficulty,
     parse_distractors,
@@ -250,9 +259,218 @@ class TestParseDifficulty:
             parse_difficulty("not json {")
 
 
+class TestConfiguredGlobs:
+    """QUIZ_GENERATED_GLOBS and .gitattributes share one normalizer."""
+
+    def test_splits_and_strips_a_glob_list(self):
+        assert parse_glob_list("*.lock, dist/*") == ("*.lock", "dist/*")
+        assert parse_glob_list("") == ()
+
+    def test_both_sources_normalize_identically(self):
+        for pattern in ("/build/out.js", "gen/", "proto/**", "docs/**/x.html"):
+            assert parse_glob_list(pattern) == parse_gitattributes_generated(
+                f"{pattern} linguist-generated"
+            ), pattern
+
+    def test_rooted_and_double_star_patterns_match_at_every_depth(self):
+        assert is_generated_path("sub/build/out.js", parse_glob_list("/build/out.js"))
+        for path in ("docs/gen.html", "docs/a/gen.html", "docs/a/b/gen.html"):
+            assert is_generated_path(path, parse_glob_list("docs/**/gen.html")), path
+
+    @pytest.mark.parametrize("pattern", ["*", "**", "***", "/**/", "**/*", "*/*", "**/**"])
+    def test_match_everything_patterns_are_dropped(self, pattern):
+        # fnmatch's "*" crosses "/", so any of these would mark every file in
+        # every PR generated and waive the gate repo-wide. The normalization
+        # itself produces some of them, so the guard has to run after it.
+        assert parse_glob_list(pattern) == (), pattern
+        assert parse_gitattributes_generated(f"{pattern} linguist-generated") == ()
+
+    def test_one_bad_entry_does_not_poison_the_rest(self):
+        assert parse_glob_list("*, dist/*") == ("dist/*",)
+
+    def test_gitattributes_honours_set_and_ignores_unset(self):
+        text = (
+            "# comment\n[attr]binary -diff\n"
+            "*.lock linguist-generated=true\n"
+            "schema.json linguist-generated\n"
+            "keep.lock -linguist-generated\n"
+            "x.json linguist-generated=false\n"
+            "* text=auto\n"
+        )
+        assert parse_gitattributes_generated(text) == ("*.lock", "schema.json")
+
+
+class TestIsGeneratedPath:
+    @pytest.mark.parametrize("path", [
+        "uv.lock", "services/api/uv.lock", "web/package-lock.json", "api/go.sum",
+        "static/app.min.js", "app.js.map", "tests/__snapshots__/ui.snap",
+        "api/schema_pb2.py", "rpc/service.pb.go", "src/models.generated.ts",
+        "vendor/lib/x.go", "third_party/vendor/y.go", "web/node_modules/pkg/index.js",
+    ])
+    def test_generated_paths_match(self, path):
+        assert is_generated_path(path)
+
+    @pytest.mark.parametrize("path", [
+        "src/job/quiz_logic.py", "README.md", "pyproject.toml", "src/locking.py",
+        "docs/lockfiles.md", "notebooks/etl.ipynb",
+    ])
+    def test_authored_paths_do_not_match(self, path):
+        assert not is_generated_path(path)
+
+    def test_matching_is_case_insensitive_on_every_platform(self):
+        # Regression guard for fnmatch (host-normcased) vs fnmatchcase: with
+        # fnmatch these pass on Windows and fail on the Linux job runtime.
+        assert is_generated_path("Sub/Dir/UV.Lock")
+        assert is_generated_path("Generated/Out.txt", ("generated/*",))
+
+
+class TestWaiveBlockers:
+    def _raw(self, name, changed=10, patch="@@\n+x", status="modified"):
+        return {"filename": name, "status": status, "changed_lines": changed,
+                "patch": patch}
+
+    def test_ordinary_pr_has_no_blockers(self):
+        assert waive_blockers([self._raw("app.py")]) == ()
+
+    def test_editing_gitattributes_blocks_a_waive(self):
+        # Otherwise a PR could declare its own files generated and waive itself.
+        raw = [self._raw(".gitattributes"), self._raw("web/.gitattributes")]
+        assert len(waive_blockers(raw)) == 1
+        assert ".gitattributes" in waive_blockers(raw)[0]
+
+    def test_a_diff_github_would_not_return_blocks_a_waive(self):
+        # "pad the file until GitHub drops the patch" is otherwise a way through.
+        raw = [self._raw("src/huge.py", changed=9000, patch=None)]
+        blockers = waive_blockers(raw)
+        assert len(blockers) == 1
+        assert "src/huge.py" in blockers[0]
+
+    def test_a_generated_file_never_blocks_a_waive(self):
+        # A big lock file is exactly where GitHub drops the patch, and exactly
+        # the case the waive exists for: flagging it blocks every such PR.
+        raw = [self._raw("uv.lock", changed=3502, patch=None)]
+        assert waive_blockers(raw) == ()
+        assert waive_blockers([self._raw("dist/app.js", changed=900, patch=None)],
+                              ("dist/*",)) == ()
+
+    def test_a_binary_does_not_block_a_waive(self):
+        # GitHub reports zero changed lines for a binary; that is genuinely
+        # nothing to review, unlike an oversized text diff.
+        assert waive_blockers([self._raw("logo.png", changed=0, patch=None)]) == ()
+
+    def test_a_deleted_file_without_a_patch_does_not_block(self):
+        raw = [self._raw("gone.py", changed=80, patch=None, status="removed")]
+        assert waive_blockers(raw) == ()
+
+
+class TestDeletionReferences:
+    def test_stem_match_finds_the_dropped_import(self):
+        others = [("src/job/main.py", "-from retry import retry_wait")]
+        assert deletion_references("src/job/retry.py", others) == ("src/job/main.py",)
+
+    def test_short_stem_does_not_match(self):
+        # "api" would otherwise cite half the PR
+        assert deletion_references("src/api.py", [("c.py", "call the api")]) == ()
+
+    def test_unrelated_files_are_not_cited(self):
+        assert deletion_references("src/retry.py", [("o.py", "+nothing")]) == ()
+
+
+class TestDeletedFileText:
+    def _patch(self, n):
+        return "\n".join(f"-line {i}" for i in range(n))
+
+    def test_excerpt_is_capped(self):
+        text = deleted_file_text("retry.py", 100, self._patch(100), (), preview_lines=5)
+        assert "-line 4" in text
+        assert "-line 5" not in text
+
+    def test_short_patch_is_shown_in_full(self):
+        assert "-line 2" in deleted_file_text("retry.py", 3, self._patch(3), ())
+
+
+class TestDeletionBlock:
+    def _deleted(self, name, size=50):
+        return {"filename": name, "status": "removed", "text": "d" * size,
+                "changed_lines": 0, "references": ()}
+
+    def test_empty_input_gives_empty_string(self):
+        assert deletion_block([], 1000) == ""
+
+    def test_overflowing_entries_lose_the_excerpt_but_keep_the_name(self):
+        deleted = [self._deleted("a.py", 400), self._deleted("b.py", 400)]
+        block = deletion_block(deleted, len(DELETED_BLOCK_HEADER) + 410)
+        assert block.count("d" * 400) == 1
+        assert "b.py" in block
+
+
+class TestPrepareFiles:
+    def _raw(self, name, status="modified", changed=10, patch="@@\n+x"):
+        return {"filename": name, "status": status, "changed_lines": changed,
+                "patch": patch}
+
+    def test_corpus_shape_and_weight(self):
+        diff = prepare_files([self._raw("b.py"), self._raw("a.py")])
+        assert [f["filename"] for f in diff.files] == ["b.py", "a.py"]  # provider order
+        assert set(diff.files[0]) == {"filename", "status", "text", "changed_lines",
+                                      "references"}
+        assert diff.files[0]["text"].endswith("@@\n+x")
+        assert diff.changed_lines == 20
+
+    def test_generated_files_are_dropped_uncounted_and_named(self):
+        raw = [self._raw("uv.lock", changed=4000), self._raw("app.py", changed=6)]
+        diff = prepare_files(raw)
+        assert [f["filename"] for f in diff.files] == ["app.py"]
+        assert diff.changed_lines == 6
+        assert diff.skipped_generated == ("uv.lock",)
+
+    def test_configured_globs_reach_the_predicate(self):
+        raw = [self._raw("dist/bundle.js", changed=900), self._raw("app.py", changed=4)]
+        diff = prepare_files(raw, ("dist/*",))
+        assert [f["filename"] for f in diff.files] == ["app.py"]
+        assert diff.changed_lines == 4
+
+    def test_deleted_file_weighs_nothing_and_cites_its_caller(self):
+        raw = [
+            self._raw("src/retry.py", status="removed", changed=900,
+                      patch="\n".join(f"-line {i}" for i in range(900))),
+            self._raw("src/main.py", patch="-from retry import retry_wait"),
+        ]
+        diff = prepare_files(raw)
+        assert diff.changed_lines == 10  # only the surviving file's lines
+        assert diff.files[0]["changed_lines"] == 0
+        assert diff.files[0]["references"] == ("src/main.py",)
+        assert "-line 899" not in diff.files[0]["text"]  # excerpt capped
+
+    def test_deleted_files_do_not_cite_each_other(self):
+        raw = [self._raw(f"{d}/retry.py", status="removed", patch="-import retry")
+               for d in ("a", "b")]
+        assert all(f["references"] == () for f in prepare_files(raw).files)
+
+    def test_binary_is_neither_shown_nor_counted(self):
+        diff = prepare_files([self._raw("logo.png", changed=0, patch=None)])
+        assert (diff.files, diff.changed_lines, diff.unreviewable) == ([], 0, ())
+
+    def test_an_undiffable_change_is_reported_even_though_it_cannot_be_quizzed(self):
+        raw = [self._raw("src/huge.py", changed=9000, patch=None), self._raw("app.py")]
+        diff = prepare_files(raw)
+        assert [f["filename"] for f in diff.files] == ["app.py"]
+        assert diff.changed_lines == 10
+        assert diff.unreviewable == ("src/huge.py",)
+
+    def test_an_all_generated_pr_yields_an_empty_corpus(self):
+        diff = prepare_files([self._raw("uv.lock", changed=4000)])
+        assert (diff.files, diff.changed_lines) == ([], 0)
+
+
 class TestChunkFiles:
     def _file(self, name, size, changed=10):
-        return {"filename": name, "text": "x" * size, "changed_lines": changed}
+        return {"filename": name, "status": "modified", "text": "x" * size,
+                "changed_lines": changed, "references": ()}
+
+    def _deleted(self, name, size=40, references=()):
+        return {"filename": name, "status": "removed", "text": "d" * size,
+                "changed_lines": 0, "references": references}
 
     def test_all_files_fit_single_chunk(self):
         files = [self._file("a.py", 100, changed=3), self._file("b.py", 200, changed=7)]
@@ -286,6 +504,45 @@ class TestChunkFiles:
         chunks = chunk_files([self._file("a.py", 100)], budget=100)
         assert len(chunks) == 1
         assert chunks[0]["text"] == "x" * 100
+
+    def test_a_deletion_lands_only_in_the_chunk_that_referenced_it(self):
+        # The whole point: the deletion travels with the code that shows its
+        # impact, and is not bought twice by asking about it in every chunk.
+        files = [
+            self._deleted("gone.py", references=("b.py",)),
+            self._file("a.py", 400),
+            self._file("b.py", 400),
+        ]
+        chunks = chunk_files(files, budget=900)
+        assert len(chunks) == 2
+        assert [c["filenames"] for c in chunks] == [["a.py"], ["gone.py", "b.py"]]
+        assert sum(c["text"].count("d" * 40) for c in chunks) == 1
+
+    def test_an_unreferenced_deletion_falls_back_to_the_closest_path(self):
+        files = [
+            self._deleted("src/api/gone.py"),
+            self._file("docs/x.md", 400),
+            self._file("src/api/keep.py", 400),
+        ]
+        chunks = chunk_files(files, budget=900)
+        assert chunks[1]["filenames"] == ["src/api/gone.py", "src/api/keep.py"]
+
+    def test_deletions_do_not_change_chunk_weights(self):
+        files = [self._deleted("gone.py"), self._file("a.py", 100, changed=7)]
+        assert chunk_files(files, budget=1000)[0]["changed_lines"] == 7
+
+    def test_delete_only_corpus_gives_one_chunk_of_just_the_block(self):
+        chunks = chunk_files([self._deleted("a.py"), self._deleted("b.py")], budget=1000)
+        assert len(chunks) == 1
+        assert chunks[0]["changed_lines"] == 0
+        assert chunks[0]["filenames"] == ["a.py", "b.py"]
+
+    def test_survivors_are_packed_against_the_reduced_budget(self):
+        survivors = [self._file("a.py", 300), self._file("b.py", 300)]
+        # 300 + 2 + 300 = 602 fits a 660 budget on its own...
+        assert len(chunk_files(survivors, budget=660)) == 1
+        # ...but not once the deletion reserve is taken out of the same budget
+        assert len(chunk_files([self._deleted("gone.py", 100)] + survivors, budget=660)) == 2
 
 
 class TestAllocateQuestions:

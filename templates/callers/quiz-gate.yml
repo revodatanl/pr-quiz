@@ -36,6 +36,9 @@ jobs:
       # workflow's default with an empty string.
       results_table: ${{ vars.QUIZ_RESULTS_TABLE || 'workspace.pr_quiz.quiz_results' }}
       status_context: ${{ vars.QUIZ_STATUS_CONTEXT || 'quiz-gate' }}
+      # Must match quiz-generate's waive_authors: those PRs never produce a quiz
+      # result, so a /quiz-check would otherwise block what quiz-generate waived.
+      waive_authors: ${{ vars.QUIZ_WAIVE_AUTHORS || 'dependabot[bot]' }}
       pr_number: ${{ inputs.pr_number }}
     secrets:
       databricks_host: ${{ secrets.DATABRICKS_HOST }}

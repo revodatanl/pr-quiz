@@ -60,6 +60,14 @@ Generate exactly {count} multiple-choice questions about the diff below. Rules:
   new value of X?", "Which function was added?"). A "what changed" question is allowed
   only when its answer states what the change does or means, not which text it touched.
   Nothing about line numbers, whitespace, or counting edits.
+- The "Files deleted by this pull request" block lists files this PR removes, with hints about
+  which changed files referenced them and a short excerpt of what was removed. That excerpt is
+  context only: never ask what the removed code did, how it worked, or what a name inside it
+  meant. The one allowed style for a deleted file is the consequence of removing it, phrased like
+  "What are the potential implications of deleting <file>?" - and its correct answer must be about
+  the code that REMAINS (what can no longer be called, what now handles it instead, what a
+  surviving caller has to do differently), never about the deleted lines themselves. At most one
+  such question per deleted file.
 - When {count} allows and the diff uses a name whose meaning is not obvious from the name alone
   (a variable, function, parameter, config key, or a term in docs or comments), include at
   least one question phrased like "In <function or file>, what does <name> refer to?". The

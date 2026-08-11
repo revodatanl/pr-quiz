@@ -49,6 +49,7 @@ from quiz_logic import (
     parse_ambiguity_verdicts,
     parse_difficulty,
     parse_distractors,
+    parse_glob_list,
     parse_questions,
     SPACING_MIN,
     narrow_spacing,
@@ -469,6 +470,48 @@ POOL_TABLE_DDL = """CREATE TABLE IF NOT EXISTS {table} (
   n_per_attempt INT NOT NULL, generated_at TIMESTAMP NOT NULL)"""
 
 
+WAIVED_TAKER = "waived: no reviewable changes"
+
+
+def write_waiver(results_table, provider, repo, head_sha, pr_number):
+    """Record a waived commit as a passing, zero-question result.
+
+    The gate reads quiz_results, not commit statuses, so a waive that only posted
+    a status is forgotten the moment anyone runs /quiz-check. `n_questions = 0`
+    marks the row as a waiver: a real attempt always asks at least one question.
+    INSERT, not saveAsTable - an append to a missing table would create it with
+    this statement's schema and drift from sql/init_tables.sql.
+
+    Idempotent per (provider, repo, head_sha) like write_pool, so re-running /quiz
+    on a waived PR replaces the waiver instead of stacking copies. The delete is
+    narrowed to waiver rows: a real attempt on this commit is somebody's result
+    and is never ours to remove.
+    """
+    from databricks.connect import DatabricksSession
+
+    key = {"provider": provider, "repo": repo, "head_sha": head_sha}
+    spark = DatabricksSession.builder.getOrCreate()
+    spark.sql(
+        f"DELETE FROM {results_table} WHERE head_sha = :head_sha AND repo = :repo "
+        "AND provider = :provider AND n_questions = 0",
+        args=key,
+    )
+    spark.sql(
+        f"INSERT INTO {results_table} "
+        "(provider, repo, head_sha, pr_number, taker, score_pct, n_questions, passed, "
+        "question_ids, submitted_at) VALUES "
+        "(:provider, :repo, :head_sha, :pr_number, :taker, 100.0, 0, true, "
+        "NULL, current_timestamp())",
+        args={
+            "provider": provider,
+            "repo": repo,
+            "head_sha": head_sha,
+            "pr_number": pr_number,
+            "taker": WAIVED_TAKER,
+        },
+    )
+
+
 def write_pool(table, provider, repo, head_sha, pr_number, questions, n_per_attempt):
     """Idempotent per (provider, repo, head_sha): replace any previous pool for this commit."""
     from databricks.connect import DatabricksSession
@@ -501,8 +544,11 @@ def main():
     parser.add_argument("--provider", default="github")
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--table", required=True)
+    parser.add_argument("--results-table", required=True)
     parser.add_argument("--secret-scope", required=True)
     parser.add_argument("--secret-key", required=True)
+    parser.add_argument("--status-context", required=True)
+    parser.add_argument("--generated-globs", default="")
     args = parser.parse_args()
 
     if args.pr_number <= 0:
@@ -522,9 +568,55 @@ def main():
     w = WorkspaceClient()
     provider_impl = get_provider(args.provider)
     token = provider_impl.get_token(w, args.secret_scope, args.secret_key)
-    files, changed_lines = provider_impl.fetch_pr_diff(args.repo, args.pr_number, token)
+    declared_globs = provider_impl.fetch_generated_globs(args.repo, args.head_sha, token)
+    if declared_globs:
+        log(f"repo declares {len(declared_globs)} generated path glob(s): "
+            f"{', '.join(declared_globs)}")
+    else:
+        # logged either way: the fetch fails soft, so "was it read?" is otherwise
+        # unanswerable from the log
+        log("no readable .gitattributes linguist-generated declarations")
+    generated_globs = parse_glob_list(args.generated_globs) + declared_globs
+    diff, blockers = provider_impl.fetch_pr_diff(
+        args.repo, args.pr_number, token, generated_globs
+    )
+    files, changed_lines = diff.files, diff.changed_lines
+    if diff.skipped_generated:
+        # named, not just counted: "why was my file not quizzed" is otherwise
+        # unanswerable
+        log(f"skipped {len(diff.skipped_generated)} generated file(s): "
+            f"{', '.join(diff.skipped_generated)}")
+    if diff.unreviewable:
+        log(f"WARNING: {len(diff.unreviewable)} file(s) changed but GitHub returned "
+            f"no diff for them, so they cannot be quizzed: "
+            f"{', '.join(diff.unreviewable)}")
+    if not files and blockers:
+        # An empty corpus normally means nothing was reviewable, but these say the
+        # opposite: content exists and we cannot see it. Waiving here is the
+        # bypass ("pad the diff until GitHub drops it"), so fail instead.
+        raise SystemExit(
+            f"PR #{args.pr_number} has no quizzable files, but cannot be waived: "
+            + "; ".join(blockers)
+        )
     if not files:
-        raise SystemExit(f"PR #{args.pr_number} has an empty diff; nothing to quiz")
+        # Nothing a reviewer is expected to have read. Failing here would leave
+        # the PR with a red gate and no way to clear it, so waive instead. The
+        # results row goes in FIRST: it is what the gate reads, the status only
+        # caches it. A failure to post propagates - a visible error status beats a
+        # gate that stays pending forever.
+        write_waiver(args.results_table, args.provider, args.repo, args.head_sha,
+                     args.pr_number)
+        provider_impl.post_commit_status(
+            args.repo, args.head_sha, "success",
+            "Quiz waived: no reviewable changes in this PR",
+            args.status_context, token,
+        )
+        log(f"PR #{args.pr_number} has no quizzable files; "
+            f"{args.status_context} waived for {args.head_sha[:8]}")
+        # plain return, never SystemExit(0): the serverless task runs under an
+        # IPython shell that turns SystemExit into INTERNAL_ERROR even at code 0,
+        # and the workflow would post its error status over this success.
+        return
     log(f"diff fetched: {len(files)} files, {changed_lines} changed lines, "
         f"{sum(len(f['text']) for f in files)} chars")
 

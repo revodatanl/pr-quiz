@@ -1,7 +1,10 @@
 """Pure quiz-generation logic (no I/O) - unit-tested in tests/test_quiz_logic.py."""
+import fnmatch
 import json
 import math
+import posixpath
 import re
+from typing import NamedTuple
 
 MIN_QUESTIONS = 1
 MAX_QUESTIONS = 20
@@ -16,6 +19,12 @@ MAX_DIFFICULTY_FACTOR = 5.0
 JUDGE_SKIP_LINES = LINES_PER_QUESTION * MAX_QUESTIONS / MIN_DIFFICULTY_FACTOR
 CHUNK_CHAR_BUDGET = 30_000
 MAX_CHUNKS = 5  # 5 x 30k chars keeps total diff coverage at the old single-prompt limit
+DELETED_STATUSES = frozenset({"removed"})  # GitHub's status word for a deleted file
+DELETED_PREVIEW_LINES = 30  # enough to tell a one-line helper from a state machine
+DELETED_BLOCK_SHARE = 3  # deletions may claim at most 1/3 of a chunk's budget
+DELETED_BLOCK_HEADER = "Files deleted by this pull request:"
+DELETED_NAMES_LISTED = 30
+MIN_REFERENCE_STEM = 4  # "main"/"util" are everywhere; a wrong hint beats no hint
 RETRY_AFTER_CAP = 120  # trust Retry-After, but never park a worker longer than this
 SPACING_MIN = 1.0  # request-start spacing floor: long calls self-pace anyway
 SPACING_MAX = 8.0  # widening cap: past this, waiting out the 429 ladder is cheaper
@@ -26,6 +35,35 @@ SPACING_MAX = 8.0  # widening cap: past this, waiting out the 429 ladder is chea
 # path traversal); dot-prefixed names like ".github" stay valid.
 _REPO_SEGMENT = r"(?!\.+(?:/|\Z))[\w.-]+"
 REPO_PATTERN = re.compile(rf"{_REPO_SEGMENT}(?:/{_REPO_SEGMENT}){{1,2}}", re.ASCII)
+# GitHub collapses these in its own diff view, so quizzing them tests nothing.
+# Lowercase by construction: is_generated_path lowers the path before matching.
+# Deliberately absent: *.ipynb (hand-written source), dist/ and build/ (too
+# project-specific to guess - that is what the configured globs are for).
+GENERATED_PATH_GLOBS = (
+    # "*.lock" covers uv, poetry, pipenv, pdm, cargo, yarn, bundler, composer,
+    # flake and mix; the rest spell theirs differently.
+    "*.lock",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "pnpm-lock.yaml",
+    "packages.lock.json",
+    "gradle.lockfile",
+    "bun.lockb",
+    "package.resolved",
+    "go.sum",
+    "*.min.js",
+    "*.min.css",
+    "*.map",
+    "*.snap",
+    "*_pb2.py",
+    "*_pb2_grpc.py",
+    "*.pb.go",
+    "*.generated.*",
+    "*_generated.go",
+    # no "*/vendor/*" twin needed: globs match at any depth (_path_variants)
+    "vendor/*",
+    "node_modules/*",
+)
 
 
 def is_valid_repo(repo):
@@ -180,18 +218,302 @@ def remove_soft_duplicates(questions, groups):
     return [q for i, q in enumerate(questions) if i not in drop]
 
 
+def _expand_glob(pattern):
+    """Normalize one configured path pattern onto what is_generated_path matches.
+
+    Shared by both configured sources (the adopter's globs and the repo's
+    .gitattributes) so a pattern means the same thing wherever it is written.
+    Anchoring is not reproduced; "**" expands to both the zero-directory and the
+    one-or-more-directory form. A match-everything pattern is dropped rather than
+    obeyed - fnmatch's "*" crosses "/", so honoring one would class every file in
+    every PR as generated and waive the gate repo-wide.
+
+    Returns 0, 1 or 2 globs.
+    """
+    glob = pattern.strip().strip("/")
+    if not glob or glob.startswith("!"):
+        return ()
+    while glob.startswith("**/"):
+        glob = glob[3:]
+    if glob.endswith("/**"):
+        glob = glob[:-3] + "/*"
+    expanded = (
+        (glob.replace("/**/", "/"), glob.replace("/**/", "/*/"))
+        if "/**/" in glob
+        else (glob,)
+    )
+    # After normalization, never before: "**/*" and "*/*" survive the checks above
+    # and collapse into a match-everything glob only at this point.
+    return tuple(g for g in expanded if g and not _matches_everything(g))
+
+
+def _matches_everything(glob):
+    """True when `glob` would classify every path as generated.
+
+    fnmatch's "*" crosses "/", so anything built only from "*" and "/" matches
+    every path variant. Honoring one would waive the gate repo-wide, which is too
+    much damage for one stray character in a config string.
+    """
+    return set(glob) <= {"*", "/"}
+
+
+def parse_glob_list(raw):
+    """Split an adopter-supplied comma-separated glob list into clean globs."""
+    return tuple(g for part in (raw or "").split(",") for g in _expand_glob(part))
+
+
+def _path_variants(path):
+    """`path` plus every sub-path starting at a directory boundary.
+
+    "web/dist/app.js" -> ("web/dist/app.js", "dist/app.js", "app.js"), so a glob
+    applies at any depth the way git reads an unanchored pattern.
+    """
+    parts = path.split("/")
+    return tuple("/".join(parts[i:]) for i in range(len(parts)))
+
+
+def is_generated_path(path, extra_globs=()):
+    """True when `path` looks machine-generated rather than authored.
+
+    fnmatchcase over a pre-lowered path, never fnmatch: fnmatch normcases via the
+    HOST os, so a glob would behave differently on Windows and on the Linux job.
+    """
+    globs = GENERATED_PATH_GLOBS + tuple(g.lower() for g in extra_globs)
+    variants = _path_variants(path.lower())
+    return any(
+        fnmatch.fnmatchcase(variant, glob) for variant in variants for glob in globs
+    )
+
+
+def parse_gitattributes_generated(text):
+    """Globs a .gitattributes marks as linguist-generated, in file order.
+
+    A repo that already declares its generated paths gets them skipped with no
+    extra configuration. Only the forms that SET the attribute count; the unset
+    forms ("-linguist-generated", "=false") are skipped. Patterns go through
+    _expand_glob, the same translation the adopter's globs get.
+    """
+    globs = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        # "[attr]foo ..." defines a macro, not a path rule
+        if not line or line.startswith("#") or line.startswith("["):
+            continue
+        pattern, *attrs = line.split()
+        if not any(a in ("linguist-generated", "linguist-generated=true") for a in attrs):
+            continue
+        globs.extend(_expand_glob(pattern))
+    return tuple(globs)
+
+
+def is_deleted(f):
+    """True when a raw or corpus file record describes a file the PR removes."""
+    return f.get("status") in DELETED_STATUSES
+
+
+def deletion_references(deleted_path, others):
+    """Paths among `others` [(filename, patch)] whose patch text mentions `deleted_path`.
+
+    A hint, not a proof: a file that stopped importing the deleted module is the
+    whole answer to "what does removing this break", and a substring search finds
+    it without spending a model call. Matches the full path, the basename and the
+    extension-free stem. Blind to re-exports, dynamic imports and files the PR
+    never touched, hence "hints" in the rendered header.
+    """
+    base = posixpath.basename(deleted_path)
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    needles = {deleted_path, base}
+    if len(stem) >= MIN_REFERENCE_STEM:
+        needles.add(stem)
+    return tuple(
+        name for name, patch in others if any(n in (patch or "") for n in needles)
+    )
+
+
+def deleted_file_text(filename, changed_lines, patch, references,
+                      preview_lines=DELETED_PREVIEW_LINES):
+    """One deleted file's block: what it was, who referenced it, a capped excerpt.
+
+    The excerpt is the head of the removal patch, where a file explains itself -
+    a filename alone cannot tell a one-line helper from a state machine. Capped so
+    a 4000-line deletion cannot crowd out the surviving code the answer needs.
+    """
+    lines = [f"--- {filename} (DELETED by this PR)"]
+    if references:
+        lines.append(f"    referenced in changed files: {', '.join(references)}")
+    removed = (patch or "").splitlines()
+    if not removed:
+        # GitHub returns no patch for a binary or oversized removal
+        lines.append(f"    {changed_lines} lines removed; contents not available")
+        return "\n".join(lines)
+    shown, rest = removed[:preview_lines], removed[preview_lines:]
+    scope = f"first {len(shown)} of {len(removed)}" if rest else f"all {len(removed)}"
+    lines.append(f"    {scope} removed lines, for context only:")
+    lines.extend(shown)
+    if rest:
+        lines.append("    [excerpt truncated]")
+    return "\n".join(lines)
+
+
+def deletion_block(deleted, budget):
+    """The deletion context chunk_files prepends to the chunk they belong with.
+
+    Files whose excerpt does not fit the budget are still named rather than
+    dropped silently.
+    """
+    if not deleted:
+        return ""
+    parts = [DELETED_BLOCK_HEADER]
+    used = len(DELETED_BLOCK_HEADER)
+    listed_only = []
+    for f in deleted:
+        if used + len(f["text"]) + 2 <= budget:
+            parts.append(f["text"])
+            used += len(f["text"]) + 2
+        else:
+            listed_only.append(f["filename"])
+    if listed_only:
+        shown = listed_only[:DELETED_NAMES_LISTED]
+        note = ", ".join(shown)
+        if len(listed_only) > len(shown):
+            note += f", and {len(listed_only) - len(shown)} more"
+        parts.append(
+            "    also deleted, named without context to leave room for the "
+            f"surviving code: {note}"
+        )
+    return "\n\n".join(parts)
+
+
+def is_unreviewable(f):
+    """True when a patchless record is real content GitHub simply would not show.
+
+    GitHub omits `patch` for two different reasons and reports them differently:
+    a binary file comes back with zero changed lines, while a text diff it
+    considers too large keeps its real line counts. Only the second is source
+    someone was meant to review, and treating the two alike is what makes
+    "pad the diff until GitHub drops it" a way past the gate.
+    """
+    return not f.get("patch") and not is_deleted(f) and f.get("changed_lines", 0) > 0
+
+
+def waive_blockers(raw, generated_globs=()):
+    """Reasons an empty corpus must NOT be waived, as human-readable strings.
+
+    A waive says "there is nothing here anyone could review". Two situations make
+    that claim unsafe even when the corpus really is empty: the PR editing the
+    very .gitattributes that decides what counts as generated, and a diff GitHub
+    refused to return, which is unreviewable rather than absent.
+
+    Generated files are exempt from the second check. A big lock file is exactly
+    the case where GitHub drops the patch, and it is also the case the waive
+    exists to serve - flagging it would block every lockfile-only PR.
+    """
+    reasons = []
+    if any(posixpath.basename(f["filename"]) == ".gitattributes" for f in raw):
+        reasons.append("the PR edits .gitattributes, which decides what is skipped")
+    oversized = [
+        f["filename"] for f in raw
+        if is_unreviewable(f) and not is_generated_path(f["filename"], generated_globs)
+    ]
+    if oversized:
+        reasons.append(
+            f"{len(oversized)} file(s) have changes GitHub would not return a diff "
+            f"for: {', '.join(oversized[:5])}"
+        )
+    return tuple(reasons)
+
+
+class PreparedDiff(NamedTuple):
+    """What the job needs about a PR's diff, once the unreviewable parts are out."""
+
+    files: list  # quizzable corpus, in provider order
+    changed_lines: int  # sizing weight; NOT the PR's raw changed-line count
+    skipped_generated: tuple  # dropped as machine-generated, for the log
+    unreviewable: tuple  # real changes GitHub would not show, for the log
+
+
+def prepare_files(raw, generated_globs=()):
+    """Normalize provider file records into the quiz corpus plus its sizing weight.
+
+    `raw` holds one {'filename', 'status', 'changed_lines', 'patch'} dict per file
+    the PR touches, in provider order.
+
+    Only changes a reviewer is asked to understand reach the corpus or the weight.
+    Generated content is dropped outright; a deleted file is kept as context but
+    weighs nothing, since the one thing worth asking about it is the consequence
+    of the removal; and a patchless file cannot be put in front of anyone, so it
+    is neither shown nor counted. Both kinds of drop are reported rather than
+    silent - see waive_blockers for the ones that must not end in a waive.
+    """
+    kept, skipped = [], []
+    for f in raw:
+        target = skipped if is_generated_path(f["filename"], generated_globs) else kept
+        target.append(f)
+    # One deleted file citing another says nothing about what the removal breaks.
+    surviving = [
+        (f["filename"], f["patch"]) for f in kept if f.get("patch") and not is_deleted(f)
+    ]
+    files = []
+    total = 0
+    for f in kept:
+        if is_deleted(f):
+            references = deletion_references(f["filename"], surviving)
+            files.append(
+                {
+                    "filename": f["filename"],
+                    "status": f["status"],
+                    "text": deleted_file_text(
+                        f["filename"], f["changed_lines"], f.get("patch"), references
+                    ),
+                    "changed_lines": 0,
+                    "references": references,
+                }
+            )
+            continue
+        if f.get("patch"):
+            total += f["changed_lines"]
+            files.append(
+                {
+                    "filename": f["filename"],
+                    "status": f["status"],
+                    "text": f"--- {f['filename']} ({f['status']})\n{f['patch']}",
+                    "changed_lines": f["changed_lines"],
+                    "references": (),
+                }
+            )
+    return PreparedDiff(
+        files,
+        total,
+        tuple(f["filename"] for f in skipped),
+        tuple(f["filename"] for f in kept if is_unreviewable(f)),
+    )
+
+
 def chunk_files(files, budget=CHUNK_CHAR_BUDGET, max_chunks=MAX_CHUNKS):
     """Group whole per-file patches, in input order, into per-prompt diff chunks.
 
     A single file longer than budget becomes its own chunk, truncated. Once
     max_chunks chunks exist, files that do not fit the last chunk are dropped
     (bounds model calls, like the old single-prompt character truncation).
+
+    Each deleted file goes into ONE chunk: the one holding a surviving file that
+    referenced it, else the closest by path. Its impact is only visible against
+    the code that remains, so it has to travel with that code rather than sit in
+    whichever chunk provider order happened to put it in - and repeating it in
+    every chunk would just buy the same question several times over. Deleted
+    files carry zero changed_lines, so they never shift question allocation.
     """
+    deleted = [f for f in files if is_deleted(f)]
+    reserve = max(1, budget // DELETED_BLOCK_SHARE) if deleted else 0
+    # floors at 1 so an absurdly small budget cannot make the slice below nonsense
+    room = max(budget - reserve - 2, 1) if reserve else budget
     chunks = []
     for f in files:
+        if is_deleted(f):
+            continue
         if chunks:
             joined = chunks[-1]["text"] + "\n\n" + f["text"]
-            if len(joined) <= budget:
+            if len(joined) <= room:
                 chunks[-1]["text"] = joined
                 chunks[-1]["changed_lines"] += f["changed_lines"]
                 chunks[-1]["filenames"].append(f["filename"])
@@ -199,12 +521,51 @@ def chunk_files(files, budget=CHUNK_CHAR_BUDGET, max_chunks=MAX_CHUNKS):
         if len(chunks) < max_chunks:
             chunks.append(
                 {
-                    "text": f["text"][:budget],
+                    "text": f["text"][:room],
                     "changed_lines": f["changed_lines"],
                     "filenames": [f["filename"]],
                 }
             )
+    if not deleted:
+        return chunks
+    if not chunks:
+        chunks.append({"text": "", "changed_lines": 0, "filenames": []})
+    assigned = [[] for _ in chunks]
+    for f in deleted:
+        assigned[assign_deletion(f, [c["filenames"] for c in chunks])].append(f)
+    for chunk, group in zip(chunks, assigned):
+        block = deletion_block(group, reserve)
+        if not block:
+            continue
+        chunk["text"] = f"{block}\n\n{chunk['text']}" if chunk["text"] else block
+        chunk["filenames"] = [f["filename"] for f in group] + chunk["filenames"]
     return chunks
+
+
+def assign_deletion(deleted, chunk_filenames):
+    """Index of the chunk a deleted file belongs with.
+
+    A chunk that changed a file referencing the deletion wins outright - that
+    pairing is the whole answer to what the removal broke. Failing that, the
+    chunk sharing the longest directory prefix, so a deletion at least lands
+    near its own part of the tree.
+    """
+    for i, names in enumerate(chunk_filenames):
+        if any(name in names for name in deleted.get("references", ())):
+            return i
+    parts = deleted["filename"].split("/")[:-1]
+
+    def shared(name):
+        other = name.split("/")[:-1]
+        common = 0
+        for a, b in zip(parts, other):
+            if a != b:
+                break
+            common += 1
+        return common
+
+    scores = [max((shared(n) for n in names), default=0) for names in chunk_filenames]
+    return scores.index(max(scores)) if scores else 0
 
 
 def allocate_questions(total, weights):

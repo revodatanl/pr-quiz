@@ -81,7 +81,8 @@ CALLER_QUIZ_GENERATE = """\
 #      DATABRICKS_CLIENT_SECRET (a service principal that can run the quiz
 #      job and manage the quiz app).
 #   3. Optionally set repo variables (defaults shown below): QUIZ_APP_NAME,
-#      QUIZ_JOB_NAME, QUIZ_STATUS_CONTEXT, QUIZ_WAIVE_AUTHORS, QUIZ_TARGET_BRANCH.
+#      QUIZ_JOB_NAME, QUIZ_STATUS_CONTEXT, QUIZ_WAIVE_AUTHORS, QUIZ_TARGET_BRANCH,
+#      QUIZ_GENERATED_GLOBS.
 #   4. Adjust `branches:` below AND QUIZ_TARGET_BRANCH (or its fallback) to
 #      the branch your quiz gate protects: the `branches:` filter only
 #      applies to pull_request events, not to /quiz comments - target_branch
@@ -115,6 +116,10 @@ jobs:
       status_context: ${{ vars.QUIZ_STATUS_CONTEXT || 'quiz-gate' }}
       waive_authors: ${{ vars.QUIZ_WAIVE_AUTHORS || 'dependabot[bot]' }}
       target_branch: ${{ vars.QUIZ_TARGET_BRANCH || 'main' }}  # keep in sync with `branches:` above
+      # Extra machine-generated paths to skip, on top of the built-in list and
+      # whatever this repo's .gitattributes marks linguist-generated. Empty is
+      # fine - this only adds project-specific paths (e.g. 'dist/*,*.pb.h').
+      generated_globs: ${{ vars.QUIZ_GENERATED_GLOBS }}
     secrets:
       databricks_host: ${{ secrets.DATABRICKS_HOST }}
       databricks_client_id: ${{ secrets.DATABRICKS_CLIENT_ID }}
@@ -160,6 +165,9 @@ jobs:
       # workflow's default with an empty string.
       results_table: ${{ vars.QUIZ_RESULTS_TABLE || 'workspace.pr_quiz.quiz_results' }}
       status_context: ${{ vars.QUIZ_STATUS_CONTEXT || 'quiz-gate' }}
+      # Must match quiz-generate's waive_authors: those PRs never produce a quiz
+      # result, so a /quiz-check would otherwise block what quiz-generate waived.
+      waive_authors: ${{ vars.QUIZ_WAIVE_AUTHORS || 'dependabot[bot]' }}
       pr_number: ${{ inputs.pr_number }}
     secrets:
       databricks_host: ${{ secrets.DATABRICKS_HOST }}

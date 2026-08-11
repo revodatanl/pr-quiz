@@ -15,6 +15,7 @@ from gate_check import (
     clip_verdict,
     format_error,
     format_verdict,
+    is_waiver,
     main,
 )
 
@@ -35,6 +36,11 @@ class TestBuildGateQuery:
     def test_custom_table_is_interpolated(self):
         query = build_gate_query("workspace.other_schema.results")
         assert "FROM workspace.other_schema.results " in query
+
+    def test_selects_n_questions_so_waivers_are_recognisable(self):
+        # A waiver row is a passing zero-question row; without this column the
+        # gate cannot tell it from a perfect attempt.
+        assert "n_questions" in build_gate_query(DEFAULT_TABLE)
 
     @pytest.mark.parametrize(
         "bad_table",
@@ -82,6 +88,26 @@ class TestFormatVerdict:
         passed, message = format_verdict(row, "abc123def456", "org/repo")
         assert passed is False
 
+    def test_waiver_row_passes(self):
+        # The job writes this row when a PR has nothing quizzable, so a later
+        # /quiz-check keeps agreeing with the waive instead of blocking.
+        row = [100.0, True, "2026-07-13T00:00:00Z", 0]
+        passed, _ = format_verdict(row, "abc123def456", "org/repo")
+        assert passed is True
+
+    def test_waiver_row_with_string_values_passes(self):
+        # The SQL Statement Execution API returns every column as a string.
+        row = ["100.0", "true", "2026-07-13T00:00:00Z", "0"]
+        passed, _ = format_verdict(row, "abc123def456", "org/repo")
+        assert passed is True
+
+    def test_zero_question_row_that_did_not_pass_still_blocks(self):
+        # is_waiver only relabels a row the gate already accepted; it must never
+        # turn a failing row into a pass.
+        row = [0.0, False, "2026-07-13T00:00:00Z", 0]
+        passed, _ = format_verdict(row, "abc123def456", "org/repo")
+        assert passed is False
+
     def test_long_repo_name_verdict_fits_commit_status_limit(self):
         # GitHub rejects commit-status descriptions over 140 chars with a 422;
         # a long owner/name must not push the verdict past the limit.
@@ -91,6 +117,25 @@ class TestFormatVerdict:
         assert len(message) == MAX_VERDICT_LEN
         assert message.startswith("BLOCKED: no quiz result for")
         assert message.endswith("...")
+
+
+class TestIsWaiver:
+    def test_zero_questions_is_a_waiver(self):
+        assert is_waiver([100.0, True, "t", 0]) is True
+        assert is_waiver([100.0, True, "t", "0"]) is True
+
+    def test_any_question_count_is_an_attempt(self):
+        assert is_waiver([100.0, True, "t", 1]) is False
+        assert is_waiver([100.0, True, "t", "12"]) is False
+
+    def test_row_without_the_column_is_an_attempt(self):
+        # Rows written before waivers existed, and any caller still selecting
+        # the old three columns, must not be mistaken for waivers.
+        assert is_waiver([100.0, True, "t"]) is False
+
+    def test_null_or_unparseable_count_is_an_attempt(self):
+        assert is_waiver([100.0, True, "t", None]) is False
+        assert is_waiver([100.0, True, "t", "not a number"]) is False
 
 
 class TestClipVerdict:

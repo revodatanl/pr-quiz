@@ -8,6 +8,7 @@ import pytest
 
 import diff_providers
 import github_diff
+import github_status
 
 
 class TestGetProvider:
@@ -18,11 +19,16 @@ class TestGetProvider:
         impl = diff_providers.get_provider("github")
         assert impl.fetch_pr_diff is github_diff.fetch_pr_diff
         assert impl.get_token is github_diff.get_github_token
+        assert impl.fetch_generated_globs is github_diff.fetch_generated_globs
+        assert impl.post_commit_status is github_status.post_commit_status
 
     def test_returned_provider_exposes_the_ops_generate_quiz_uses(self):
         impl = diff_providers.get_provider("github")
         assert callable(impl.fetch_pr_diff)
         assert callable(impl.get_token)
+        # the waive path: nothing to quiz must still be able to clear the gate
+        assert callable(impl.fetch_generated_globs)
+        assert callable(impl.post_commit_status)
 
     def test_unknown_name_raises_with_a_clear_message(self):
         with pytest.raises(diff_providers.UnknownProviderError, match="azuredevops"):
