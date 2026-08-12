@@ -65,17 +65,15 @@ import github_diff
 import github_status
 
 DIFF_CHAR_LIMIT = 150_000
-MAX_TOKENS_PER_BATCH = 8000  # gpt-oss spends output tokens on reasoning; 4500 truncated 20-question JSON
-MAX_TOKENS_SOFT_DEDUP = 16000  # one call reasons over the WHOLE pool; 8000 came back
-                               # empty (all reasoning, no text) on a 184-question pool
+MAX_TOKENS_PER_BATCH = 8000  # reasoning eats output tokens: 4500 truncated 20-question JSON
+MAX_TOKENS_SOFT_DEDUP = 16000  # whole pool in one call: 8000 came back empty at 184 questions
 SECONDS_BETWEEN_ROUNDS = 15
 POOL_MULTIPLIER = 5
-PARALLEL_CALLS = 4  # concurrent endpoint requests per round; 429s are absorbed by the retry backoff
-OVERPROVISION = 2  # each round asks for 2x the shortfall; failed batches and duplicates eat the slack
+PARALLEL_CALLS = 4
+OVERPROVISION = 2  # failed batches and duplicates eat the slack
 MAX_ROUNDS = 3
-MAX_ATTEMPTS = 3  # parse/network/HTTP failures: something is wrong, give up quickly
-MAX_RATE_LIMIT_ATTEMPTS = 5  # 429s are transient by definition: outlasting the budget
-                             # refill beats abandoning a batch or dropping a question
+MAX_ATTEMPTS = 3  # real errors: give up quickly
+MAX_RATE_LIMIT_ATTEMPTS = 5  # 429s are transient: outlast the budget refill
 
 
 def log(msg):
@@ -87,14 +85,11 @@ class _RateLimited(RuntimeError):
     pass
 
 
-# Serialized admission gate for all worker threads. Every request start claims
-# a distinct slot (reserve_slot), so a phase kicking off 4 parallel calls fires
-# them staggered instead of as one burst — bursts, not sustained load, are what
-# the endpoint 429s. After a 429 the gate is pushed forward by the backoff and
-# waiting threads reopen one by one; a shared absolute window here caused
-# synchronized retry volleys that re-collided and escalated in lockstep.
-# Spacing is adaptive: a 429 doubles it (short validation calls fired every
-# ~1s trip the endpoint's request-rate limit), successes decay it back.
+# Serialized admission gate for all worker threads. Every request claims a
+# distinct slot, so 4 parallel calls fire staggered instead of as one burst.
+# Bursts, not sustained load, are what the endpoint 429s. A 429 pushes the gate
+# forward and doubles the spacing, successes decay it back. A shared absolute
+# window instead of per-thread slots caused synchronized retry volleys.
 _gate_lock = threading.Lock()
 _gate_next_start = 0.0
 _gate_spacing = SPACING_MIN
@@ -163,14 +158,10 @@ def _call_endpoint(w, endpoint, body, parse, label="model"):
             if isinstance(e, _RateLimited):
                 throttles += 1
                 if throttles < MAX_RATE_LIMIT_ATTEMPTS:
-                    # the wait happens at the gate: the next attempt gets a
-                    # distinct slot after the cooldown, never a synchronized volley
                     log(f"{label}: 429 #{throttles}/{MAX_RATE_LIMIT_ATTEMPTS}; "
                         f"retrying after cooldown ({e})")
             elif isinstance(e, ValueError):
-                # bad model OUTPUT (unparseable/empty response): the endpoint is
-                # healthy, waiting cannot help — retry immediately, only the
-                # admission gate spaces the next attempt
+                # unparseable output, not a sick endpoint: waiting cannot help
                 errors += 1
                 if errors < MAX_ATTEMPTS:
                     log(f"{label}: attempt {errors}/{MAX_ATTEMPTS} failed ({e}); "
@@ -461,8 +452,7 @@ def resolve_ambiguity(w, endpoint, questions, target):
     return apply_ambiguity_results(questions, resolutions)
 
 
-# Keep in sync with the question_pool DDL in sql/init_tables.sql -
-# tests/test_ddl_sync.py fails on any column/type/nullability drift.
+# Keep in sync with sql/init_tables.sql - tests/test_ddl_sync.py fails on drift.
 POOL_TABLE_DDL = """CREATE TABLE IF NOT EXISTS {table} (
   provider STRING NOT NULL, repo STRING NOT NULL, head_sha STRING NOT NULL,
   pr_number INT, question_id STRING NOT NULL,
@@ -559,8 +549,7 @@ def main():
     if not is_valid_repo(args.repo):
         raise SystemExit("repo job parameter must be owner/name (or org/project/repo), "
                          f"got {args.repo!r}")
-    # Still a real column on both tables, so it stays a job parameter - but
-    # GitHub is the only implementation. A second SCM adds its branch here.
+    # Still a column on both tables, but GitHub is the only implementation.
     if args.provider != "github":
         raise SystemExit(f"provider job parameter must be 'github', got {args.provider!r}")
 
@@ -574,22 +563,17 @@ def main():
         log(f"repo declares {len(declared_globs)} generated path glob(s): "
             f"{', '.join(declared_globs)}")
     else:
-        # logged either way: the fetch fails soft, so "was it read?" is otherwise
-        # unanswerable from the log
+        # the fetch fails soft, so log the empty case too
         log("no readable .gitattributes linguist-generated declarations")
     generated_globs = parse_glob_list(args.generated_globs) + declared_globs
     diff = github_diff.fetch_pr_diff(args.repo, args.pr_number, token, generated_globs)
     files, changed_lines = diff.files, diff.changed_lines
     if diff.skipped_generated:
-        # named, not just counted: "why was my file not quizzed" is otherwise
-        # unanswerable
         log(f"skipped {len(diff.skipped_generated)} generated file(s): "
             f"{', '.join(diff.skipped_generated)}")
     if diff.unreviewable:
-        # Not a warning. github_diff already tried to rebuild these from their
-        # blobs and could not, so they would leave the corpus AND the sizing -
-        # which is the "pad a file until GitHub stops diffing it" bypass,
-        # whether or not the rest of the PR happens to be quizzable.
+        # github_diff already failed to rebuild these. Dropping them removes them
+        # from the sizing too: the "pad a file until GitHub stops diffing" bypass.
         raise SystemExit(
             f"PR #{args.pr_number} changes {len(diff.unreviewable)} file(s) that GitHub "
             f"will not diff and the job could not rebuild: {', '.join(diff.unreviewable)}. "
@@ -597,21 +581,16 @@ def main():
             "(.gitattributes linguist-generated, or QUIZ_GENERATED_GLOBS)."
         )
     if not files and diff.edits_gitattributes:
-        # An empty corpus normally means nothing was reviewable. A PR editing
-        # .gitattributes is the case where that claim cannot be trusted: it is
-        # rewriting the very rules the emptiness was decided by. Fail instead of
-        # waiving, so declaring your own files generated is never a way through.
-        # (The undiffable reason already raised above, corpus empty or not.)
+        # This PR rewrites the rules that decided the corpus is empty, so the
+        # emptiness proves nothing. Fail, or declaring your files generated is a
+        # way through.
         raise SystemExit(
             f"PR #{args.pr_number} has no quizzable files, but cannot be waived: the "
             "PR edits .gitattributes, which decides what is skipped."
         )
     if not files:
-        # Nothing a reviewer is expected to have read. Failing here would leave
-        # the PR with a red gate and no way to clear it, so waive instead. The
-        # results row goes in FIRST: it is what the gate reads, the status only
-        # caches it. A failure to post propagates - a visible error status beats a
-        # gate that stays pending forever.
+        # Failing here leaves a red gate with no way to clear it, so waive. The
+        # results row goes in FIRST: the gate reads it, the status only caches it.
         write_waiver(args.results_table, args.provider, args.repo, args.head_sha,
                      args.pr_number)
         github_status.post_commit_status(
@@ -622,8 +601,7 @@ def main():
         log(f"PR #{args.pr_number} has no quizzable files; "
             f"{args.status_context} waived for {args.head_sha[:8]}")
         # plain return, never SystemExit(0): the serverless task runs under an
-        # IPython shell that turns SystemExit into INTERNAL_ERROR even at code 0,
-        # and the workflow would post its error status over this success.
+        # IPython shell that turns even code 0 into INTERNAL_ERROR.
         return
     log(f"diff fetched: {len(files)} files, {changed_lines} changed lines, "
         f"{sum(len(f['text']) for f in files)} chars")
@@ -642,7 +620,7 @@ def main():
 
     phase = time.monotonic()
     questions, topics = soft_dedupe_pool(w, args.endpoint, questions)
-    if len(questions) < n:  # one top-up round, steered away from already-covered topics
+    if len(questions) < n:
         shortfall = n - len(questions)
         log(f"pool below N={n} after soft-dedup; top-up round for {shortfall}+ questions")
         extra = generate_pool(w, args.endpoint, files, shortfall,
