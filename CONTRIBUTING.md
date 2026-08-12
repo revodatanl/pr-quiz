@@ -62,7 +62,7 @@ databricks_template_schema.json  Init-template parameters (project name, host, c
 template/{{.project_name}}/      Template payload; paths below are relative to it
   databricks.yml.tmpl     Bundle config: deploy target, variables (model endpoint, table names)
   resources/              Bundle resources: schema, generation job, app
-  src/job/                Generation job (quiz_logic.py pure + unit-tested; prompts.py; github_diff.py)
+  src/job/                Generation job (quiz_logic.py + diff_corpus.py pure + unit-tested; prompts.py; github_diff.py)
   src/app/                Streamlit app (app_logic.py pure + unit-tested)
   sql/init_tables.sql.tmpl  Table definitions (question_pool, quiz_results)
 actions/gate-check/       Composite action wrapping gate_check.py (local or cross-repo)

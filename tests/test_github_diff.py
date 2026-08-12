@@ -61,7 +61,7 @@ class _Api:
 
 def _record(name, patch=None, changed=9000, status="modified"):
     """One record from the PR files API. By default it has no patch, but real
-    line counts."""
+    line counts. Any positive `changed` works: is_unreviewable only reads > 0."""
     return {
         "filename": name, "status": status, "patch": patch,
         "additions": changed, "deletions": 0,
@@ -94,12 +94,12 @@ class TestFetchGeneratedGlobs:
 
     def test_a_malformed_contents_body_is_no_declarations(self, monkeypatch):
         # A 200 reply with no readable "content" must not raise out of the job.
-        monkeypatch.setattr(
-            github_diff.requests, "get",
-            lambda url, **k: (_resp(payload={"base": {"sha": BASE_SHA},
-                                             "head": {"sha": HEAD_SHA}})
-                              if "/pulls/" in url else _resp(payload={"content": None})),
-        )
+        def get(url, **kwargs):
+            if "/pulls/" in url:
+                return _resp(payload={"base": {"sha": BASE_SHA}, "head": {"sha": HEAD_SHA}})
+            return _resp(payload={"content": None})
+
+        monkeypatch.setattr(github_diff.requests, "get", get)
         assert github_diff.fetch_generated_globs("org/repo", 7, "tok") == ()
 
 

@@ -41,7 +41,6 @@ from quiz_logic import (
     allocate_questions,
     apply_ambiguity_results,
     batch_sizes,
-    chunk_files,
     compute_question_count,
     dedupe_questions,
     extract_text,
@@ -49,7 +48,6 @@ from quiz_logic import (
     parse_ambiguity_verdicts,
     parse_difficulty,
     parse_distractors,
-    parse_glob_list,
     parse_questions,
     SPACING_MIN,
     narrow_spacing,
@@ -61,6 +59,7 @@ from quiz_logic import (
     skip_difficulty_judge,
     widen_spacing,
 )
+from diff_corpus import chunk_files, parse_glob_list
 import github_diff
 import github_status
 

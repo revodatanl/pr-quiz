@@ -3,7 +3,7 @@ import base64
 
 import requests
 
-from quiz_logic import (
+from diff_corpus import (
     is_unreviewable,
     parse_gitattributes_generated,
     prepare_files,
@@ -135,7 +135,7 @@ def fetch_pr_diff(repo, pr_number, token, generated_globs=()):
     """Return the PreparedDiff for a PR, from the files API.
 
     Pages the API into raw per-file records and hands the whole list to
-    quiz_logic, which owns every judgement about them. Missing patches are
+    diff_corpus, which owns every judgement about them. Missing patches are
     rebuilt first, so an oversized diff still counts toward the question count.
     """
     raw = []
