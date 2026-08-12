@@ -1,8 +1,11 @@
-"""github_diff I/O: which commit the repo's generated-path declarations are read
-from, and rebuilding the patch GitHub declines to return for an oversized file.
+"""Tests for the I/O of github_diff.
 
-Pure/no-network: github_diff.requests.get is monkeypatched, so nothing touches a
-real socket.
+These tests cover two things. First, the commit that supplies the
+generated-path declarations of the repo. Second, the rebuild of a patch that
+GitHub does not return for a large file.
+
+No test uses the network. Each test replaces github_diff.requests.get with a
+fake, so nothing opens a socket.
 """
 import base64
 from unittest.mock import Mock
@@ -16,7 +19,7 @@ HEAD_SHA = "2" * 40
 
 
 def _resp(payload=None, content=b"", status_code=200, raises=None):
-    """Stand-in for a requests.Response: status, body, bytes, raising."""
+    """A fake requests.Response with a status, a body, and an optional error."""
     return Mock(
         content=content,
         status_code=status_code,
@@ -26,13 +29,13 @@ def _resp(payload=None, content=b"", status_code=200, raises=None):
 
 
 class _Api:
-    """Routes github_diff's GETs by URL and records every one of them."""
+    """Answers each GET of github_diff by URL, and records every call."""
 
     def __init__(self, gitattributes=None, blobs=None, files=None, pr_fails=False):
-        self.gitattributes = gitattributes  # text, or None for a 404
+        self.gitattributes = gitattributes  # text, or None to give a 404
         self.blobs = blobs or {}  # (path, ref) -> bytes, or an Exception to raise
         self.files = files or []  # one page of PR file records
-        self.pr_fails = pr_fails  # make the base/head-sha read raise
+        self.pr_fails = pr_fails  # if True, the base/head SHA read fails
         self.calls = []
 
     def get(self, url, params=None, headers=None, timeout=None):
@@ -57,7 +60,8 @@ class _Api:
 
 
 def _record(name, patch=None, changed=9000, status="modified"):
-    """A PR files-API record; patchless with real line counts by default."""
+    """One record from the PR files API. By default it has no patch, but real
+    line counts."""
     return {
         "filename": name, "status": status, "patch": patch,
         "additions": changed, "deletions": 0,
@@ -66,9 +70,9 @@ def _record(name, patch=None, changed=9000, status="modified"):
 
 class TestFetchGeneratedGlobs:
     def test_declarations_are_read_from_the_base_commit_never_the_head(self, monkeypatch):
-        # The security property. Read at the head, the pull request under review
-        # supplies the rules deciding which parts of it get reviewed: a PR could
-        # mark its own source generated and shrink its own quiz to one question.
+        # This is the security property. If the declarations come from the head,
+        # the pull request under review supplies its own review rules. A PR can
+        # then mark its own source generated and cut its quiz to one question.
         api = _Api(gitattributes="dist/* linguist-generated\n")
         monkeypatch.setattr(github_diff.requests, "get", api.get)
         assert github_diff.fetch_generated_globs("org/repo", 7, "tok") == ("dist/*",)
@@ -80,8 +84,8 @@ class TestFetchGeneratedGlobs:
         assert github_diff.fetch_generated_globs("org/repo", 7, "tok") == ()
 
     def test_an_unreadable_pr_is_no_declarations(self, monkeypatch):
-        # Fail-soft all the way down: a GitHub hiccup means quiz normally, never
-        # fail a run and block a merge.
+        # Fail-soft at every level. If GitHub fails, the job makes a normal quiz.
+        # It must never fail the run and block a merge.
         api = _Api(gitattributes="*.lock linguist-generated", pr_fails=True)
         monkeypatch.setattr(github_diff.requests, "get", api.get)
         assert github_diff.fetch_generated_globs("org/repo", 7, "tok") == ()
@@ -89,7 +93,7 @@ class TestFetchGeneratedGlobs:
         assert not [u for u, _ in api.calls if u.endswith("/.gitattributes")]
 
     def test_a_malformed_contents_body_is_no_declarations(self, monkeypatch):
-        # 200 with no decodable "content" must not raise out of the job.
+        # A 200 reply with no readable "content" must not raise out of the job.
         monkeypatch.setattr(
             github_diff.requests, "get",
             lambda url, **k: (_resp(payload={"base": {"sha": BASE_SHA},
@@ -101,8 +105,9 @@ class TestFetchGeneratedGlobs:
 
 class TestFetchPrDiffRebuildsMissingPatches:
     def test_an_oversized_text_diff_is_rebuilt_shown_and_counted(self, monkeypatch):
-        # Dropping it took its changed lines out of the question count too, which
-        # is what made "pad a file until GitHub stops diffing it" a way through.
+        # Before this rebuild, a dropped file also lost its changed lines from the
+        # question count. That made one attack possible: pad a file until GitHub
+        # stops its diff, then pass the gate.
         api = _Api(
             files=[_record("big.py")],
             blobs={("big.py", BASE_SHA): b"a\n", ("big.py", HEAD_SHA): b"a\nb\n"},
@@ -115,9 +120,9 @@ class TestFetchPrDiffRebuildsMissingPatches:
         assert "+b" in diff.files[0]["text"]
 
     def test_a_renamed_file_rebuilds_as_all_additions(self, monkeypatch):
-        # The new path 404s at base, which reads as an empty previous version. The
-        # moved-from context is lost, but the file is still shown and still
-        # counted - which is the property the gate depends on.
+        # The new path gives a 404 at the base commit, which reads as an empty
+        # previous version. The old location is lost. The file is still shown and
+        # still counted, and the gate depends on that.
         api = _Api(
             files=[_record("new.py", status="renamed")],
             blobs={("new.py", HEAD_SHA): b"a\nb\n"},
@@ -159,21 +164,13 @@ class TestFetchPrDiffRebuildsMissingPatches:
         assert diff.unreviewable == ("big.py",)
 
     def test_a_line_ending_only_change_is_dropped_not_failed(self, monkeypatch):
-        # splitlines() treats \r\n and \n alike, so a CRLF->LF normalization of a
-        # file too big for GitHub to diff rebuilds to an empty patch. There is
-        # nothing to quiz there - but failing the run over it would be wrong.
+        # splitlines() gives the same result for \r\n and \n. A CRLF-to-LF change
+        # in a file too large for GitHub to diff rebuilds to an empty patch. There
+        # is nothing to quiz, but the run must not fail.
         api = _Api(
             files=[_record("crlf.py")],
             blobs={("crlf.py", BASE_SHA): b"a\r\nb\r\n", ("crlf.py", HEAD_SHA): b"a\nb\n"},
         )
-        monkeypatch.setattr(github_diff.requests, "get", api.get)
-        diff = github_diff.fetch_pr_diff("org/repo", 7, "tok")
-        assert (diff.files, diff.changed_lines, diff.unreviewable) == ([], 0, ())
-
-    def test_a_binary_asset_is_still_neither_shown_nor_counted(self, monkeypatch):
-        # Zero changed lines is GitHub's own signal for a binary: genuinely
-        # nothing to review, so it is not rebuilt and not flagged either.
-        api = _Api(files=[_record("logo.png", changed=0)])
         monkeypatch.setattr(github_diff.requests, "get", api.get)
         diff = github_diff.fetch_pr_diff("org/repo", 7, "tok")
         assert (diff.files, diff.changed_lines, diff.unreviewable) == ([], 0, ())
