@@ -13,7 +13,6 @@ from quiz_logic import (
     apply_ambiguity_results,
     batch_sizes,
     chunk_files,
-    clamp_difficulty,
     compute_question_count,
     dedupe_questions,
     deleted_file_text,
@@ -195,18 +194,6 @@ class TestParseQuestions:
         raw = json.dumps({"questions": [self._valid_question(correct_index=99)]})
         with pytest.raises(ValueError):
             parse_questions(raw)
-
-
-class TestClampDifficulty:
-    def test_below_minimum_clamps_to_floor(self):
-        assert clamp_difficulty(0.05) == 0.2
-
-    def test_above_maximum_clamps_to_ceiling(self):
-        assert clamp_difficulty(7.3) == 5.0
-
-    def test_in_range_value_passes_through(self):
-        assert clamp_difficulty(1.5) == 1.5
-        assert clamp_difficulty(2) == 2.0
 
 
 class TestSkipDifficultyJudge:

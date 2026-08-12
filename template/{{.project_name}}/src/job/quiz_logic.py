@@ -21,7 +21,6 @@ MAX_DIFFICULTY_FACTOR = 5.0
 JUDGE_SKIP_LINES = LINES_PER_QUESTION * MAX_QUESTIONS / MIN_DIFFICULTY_FACTOR
 CHUNK_CHAR_BUDGET = 30_000
 MAX_CHUNKS = 5  # 5 x 30k chars keeps total diff coverage at the old single-prompt limit
-DELETED_STATUSES = frozenset({"removed"})  # GitHub's status word for a deleted file
 DELETED_PREVIEW_LINES = 30  # enough to tell a one-line helper from a state machine
 DELETED_BLOCK_SHARE = 3  # deletions may claim at most 1/3 of a chunk's budget
 DELETED_BLOCK_HEADER = "Files deleted by this pull request:"
@@ -87,26 +86,27 @@ def skip_difficulty_judge(changed_lines):
     return changed_lines >= JUDGE_SKIP_LINES
 
 
-def clamp_difficulty(factor):
-    """Clamp a judge-provided factor into [MIN_DIFFICULTY_FACTOR, MAX_DIFFICULTY_FACTOR]."""
-    return max(MIN_DIFFICULTY_FACTOR, min(MAX_DIFFICULTY_FACTOR, float(factor)))
+def _load(raw):
+    """json.loads, but a parse failure is the ValueError every caller retries on."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"model response is not valid JSON: {e}") from e
 
 
 def parse_difficulty(raw):
-    """Validate a difficulty-judge response; return the clamped factor.
+    """Validate a difficulty-judge response; return the factor clamped into
+    [MIN_DIFFICULTY_FACTOR, MAX_DIFFICULTY_FACTOR].
 
     Raises ValueError on unparseable JSON or a missing/non-numeric/non-finite
     difficulty_factor, so the caller can retry.
     """
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"model response is not valid JSON: {e}") from e
+    payload = _load(raw)
     factor = payload.get("difficulty_factor") if isinstance(payload, dict) else None
     # bool is an int subclass: JSON true must not become factor 1.0
     if isinstance(factor, bool) or not isinstance(factor, (int, float)) or not math.isfinite(factor):
         raise ValueError("model response has no numeric difficulty_factor")
-    return clamp_difficulty(factor)
+    return max(MIN_DIFFICULTY_FACTOR, min(MAX_DIFFICULTY_FACTOR, float(factor)))
 
 
 def retry_wait(attempt, retry_after=None):
@@ -164,14 +164,10 @@ def dedupe_questions(questions):
     removed after each round instead of relying only on the prompt's
     do-not-repeat list.
     """
-    seen = set()
-    unique = []
+    seen = {}
     for q in questions:
-        key = normalize_text(q["question"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(q)
-    return unique
+        seen.setdefault(normalize_text(q["question"]), q)
+    return list(seen.values())
 
 
 def parse_soft_dedup(raw, pool_size):
@@ -183,10 +179,7 @@ def parse_soft_dedup(raw, pool_size):
     anything malformed collapses to []. Raises ValueError on unparseable JSON
     or a missing/non-list duplicate_groups, so the caller can retry.
     """
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"model response is not valid JSON: {e}") from e
+    payload = _load(raw)
     raw_groups = payload.get("duplicate_groups") if isinstance(payload, dict) else None
     if not isinstance(raw_groups, list):
         raise ValueError("model response has no duplicate_groups list")
@@ -194,14 +187,13 @@ def parse_soft_dedup(raw, pool_size):
     for group in raw_groups:
         if not isinstance(group, list):
             continue
-        indices = []
-        for i in group:
-            # bool is an int subclass: JSON true must not become index 1
-            if (
-                isinstance(i, int) and not isinstance(i, bool)
-                and 0 <= i < pool_size and i not in indices
-            ):
-                indices.append(i)
+        # Filter before dict.fromkeys, which dedupes order-preserved but would
+        # raise on an unhashable junk entry. bool is an int subclass: JSON true
+        # must not become index 1.
+        indices = list(dict.fromkeys(
+            i for i in group
+            if isinstance(i, int) and not isinstance(i, bool) and 0 <= i < pool_size
+        ))
         if len(indices) >= 2:
             groups.append(indices)
     raw_topics = payload.get("covered_topics")
@@ -259,18 +251,11 @@ def _expand_glob(pattern):
         else (glob,)
     )
     # After normalization, never before: "**/*" and "*/*" survive the checks above
-    # and collapse into a match-everything glob only at this point.
-    return tuple(g for g in expanded if g and not _matches_everything(g))
-
-
-def _matches_everything(glob):
-    """True when `glob` would classify every path as generated.
-
-    fnmatch's "*" crosses "/", so anything built only from "*" and "/" matches
-    every path variant. Honoring one would waive the gate repo-wide, which is too
-    much damage for one stray character in a config string.
-    """
-    return set(glob) <= {"*", "/"}
+    # and collapse into a match-everything glob only at this point. fnmatch's "*"
+    # crosses "/", so a glob built only from "*" and "/" matches every path
+    # variant, and honoring one would waive the gate repo-wide - too much damage
+    # for one stray character in a config string.
+    return tuple(g for g in expanded if g and not set(g) <= {"*", "/"})
 
 
 def parse_glob_list(raw):
@@ -324,7 +309,7 @@ def parse_gitattributes_generated(text):
 
 def is_deleted(f):
     """True when a raw or corpus file record describes a file the PR removes."""
-    return f.get("status") in DELETED_STATUSES
+    return f.get("status") == "removed"  # GitHub's status word for a deletion
 
 
 def deletion_references(deleted_path, others):
@@ -599,17 +584,13 @@ def assign_deletion(deleted, chunk_filenames):
         if any(name in names for name in deleted.get("references", ())):
             return i
     parts = deleted["filename"].split("/")[:-1]
-
-    def shared(name):
-        other = name.split("/")[:-1]
-        common = 0
-        for a, b in zip(parts, other):
-            if a != b:
-                break
-            common += 1
-        return common
-
-    scores = [max((shared(n) for n in names), default=0) for names in chunk_filenames]
+    # commonprefix compares element-wise on lists, so this counts shared
+    # directories, not shared characters.
+    scores = [
+        max((len(posixpath.commonprefix([parts, n.split("/")[:-1]])) for n in names),
+            default=0)
+        for names in chunk_filenames
+    ]
     return scores.index(max(scores)) if scores else 0
 
 
@@ -663,11 +644,7 @@ def parse_questions(raw):
     Drops malformed entries; raises ValueError on unparseable JSON or when
     nothing valid remains, so the caller can retry the batch.
     """
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"model response is not valid JSON: {e}") from e
-
+    payload = _load(raw)
     valid = []
     for q in payload.get("questions", []):
         question = str(q.get("question", "")).strip()
@@ -701,10 +678,7 @@ def parse_ambiguity_verdicts(raw, valid_indices):
     JSON or when no verdict references a requested index (the model ignored
     the task), so the caller can retry.
     """
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"model response is not valid JSON: {e}") from e
+    payload = _load(raw)
     raw_verdicts = payload.get("verdicts") if isinstance(payload, dict) else None
     verdicts = {}
     for v in raw_verdicts if isinstance(raw_verdicts, list) else []:
@@ -728,10 +702,7 @@ def parse_distractors(raw, correct_answer):
     OPTIONS_PER_QUESTION - 1 non-empty distractors survive that are pairwise
     distinct and distinct from the correct answer under normalize_text.
     """
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"model response is not valid JSON: {e}") from e
+    payload = _load(raw)
     raw_distractors = payload.get("distractors") if isinstance(payload, dict) else None
     if not isinstance(raw_distractors, list):
         raise ValueError("model response has no distractors list")
