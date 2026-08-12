@@ -155,7 +155,7 @@ just fixture-clean            # close open fixture/* PRs, delete their branches
   the question count.
 - **large** — ~4,470 lines across 8 files; exercises large-diff handling (the
   difficulty judge is skipped and the diff is split into chunks, see
-  [Limits and gotchas](docs/adopting.md#limits-and-gotchas)).
+  [Limits and known problems](docs/adopting.md#limits-and-known-problems)).
 - **generated** — a ~3,500-line fake `uv.lock` plus a 12-line docs change;
   expect `N=1`, not the `N=20` the lock file's line count alone would force.
 - **deleted** — deletes two of `medium`'s modules and rewrites `orders.py` to
