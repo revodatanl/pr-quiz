@@ -1,9 +1,11 @@
 """Pure quiz-generation logic (no I/O) - unit-tested in tests/test_quiz_logic.py."""
+import difflib
 import fnmatch
 import json
 import math
 import posixpath
 import re
+from itertools import islice
 from typing import NamedTuple
 
 MIN_QUESTIONS = 1
@@ -25,6 +27,9 @@ DELETED_BLOCK_SHARE = 3  # deletions may claim at most 1/3 of a chunk's budget
 DELETED_BLOCK_HEADER = "Files deleted by this pull request:"
 DELETED_NAMES_LISTED = 30
 MIN_REFERENCE_STEM = 4  # "main"/"util" are everywhere; a wrong hint beats no hint
+# A rebuilt patch past this cannot fit a chunk anyway (CHUNK_CHAR_BUDGET would
+# truncate it mid-hunk); stopping at a line boundary at least ends on a real one.
+RECONSTRUCTED_PATCH_LINES = 2_000
 RETRY_AFTER_CAP = 120  # trust Retry-After, but never park a worker longer than this
 SPACING_MIN = 1.0  # request-start spacing floor: long calls self-pace anyway
 SPACING_MAX = 8.0  # widening cap: past this, waiting out the 429 ladder is cheaper
@@ -228,15 +233,26 @@ def _expand_glob(pattern):
     obeyed - fnmatch's "*" crosses "/", so honoring one would class every file in
     every PR as generated and waive the gate repo-wide.
 
+    A trailing slash means the directory's contents, the way git reads it. A
+    pattern WITHOUT one keeps git's other rule and matches a file of that name at
+    any depth, so "dist" is not "dist/" - _path_variants already supplies the
+    depth, and inventing the directory sense here would diverge from what the
+    same line means to git.
+
     Returns 0, 1 or 2 globs.
     """
-    glob = pattern.strip().strip("/")
+    stripped = pattern.strip()
+    glob = stripped.strip("/")
     if not glob or glob.startswith("!"):
         return ()
     while glob.startswith("**/"):
         glob = glob[3:]
     if glob.endswith("/**"):
         glob = glob[:-3] + "/*"
+    if stripped.endswith("/") and not glob.endswith("*"):
+        # Without this the glob only ever matches a FILE called "dist", i.e.
+        # nothing: every path under dist/ has more path left after the name.
+        glob += "/*"
     expanded = (
         (glob.replace("/**/", "/"), glob.replace("/**/", "/*/"))
         if "/**/" in glob
@@ -355,33 +371,75 @@ def deleted_file_text(filename, changed_lines, patch, references,
     return "\n".join(lines)
 
 
+def deletions_size(deleted):
+    """Characters deletion_block needs to render every excerpt in full."""
+    return len(DELETED_BLOCK_HEADER) + sum(len(f["text"]) + 2 for f in deleted)
+
+
+def _overflow_note(names):
+    """The line naming deletions whose excerpt did not fit."""
+    shown = names[:DELETED_NAMES_LISTED]
+    note = ", ".join(shown)
+    if len(names) > len(shown):
+        note += f", and {len(names) - len(shown)} more"
+    return ("    also deleted, named without context to leave room for the "
+            f"surviving code: {note}")
+
+
 def deletion_block(deleted, budget):
     """The deletion context chunk_files prepends to the chunk they belong with.
 
     Files whose excerpt does not fit the budget are still named rather than
-    dropped silently.
+    dropped silently, and that naming line is budgeted too: chunk_files hands out
+    the rest of the chunk on the promise that this block fits `budget`. The
+    reserve is sized from the worst case, every file named, so the line that
+    actually renders - always a subset - can only be shorter.
     """
     if not deleted:
         return ""
+    reserve = (
+        0 if deletions_size(deleted) <= budget
+        else len(_overflow_note([f["filename"] for f in deleted])) + 2
+    )
     parts = [DELETED_BLOCK_HEADER]
     used = len(DELETED_BLOCK_HEADER)
     listed_only = []
     for f in deleted:
-        if used + len(f["text"]) + 2 <= budget:
+        if used + len(f["text"]) + 2 <= budget - reserve:
             parts.append(f["text"])
             used += len(f["text"]) + 2
         else:
             listed_only.append(f["filename"])
     if listed_only:
-        shown = listed_only[:DELETED_NAMES_LISTED]
-        note = ", ".join(shown)
-        if len(listed_only) > len(shown):
-            note += f", and {len(listed_only) - len(shown)} more"
-        parts.append(
-            "    also deleted, named without context to leave room for the "
-            f"surviving code: {note}"
-        )
+        parts.append(_overflow_note(listed_only))
     return "\n\n".join(parts)
+
+
+def render_patch(old_text, new_text):
+    """A capped unified diff of two file versions, shaped like GitHub's `patch`.
+
+    GitHub omits `patch` for a text diff it considers too large. Rebuilding it
+    keeps that change inside the corpus AND inside the question count; dropping
+    it took its changed lines out of the sizing too, which is what made
+    "pad a file until GitHub stops diffing it" a way past the gate.
+
+    Headerless, like GitHub's own patch text: the ---/+++ file lines are dropped
+    by position, never by prefix, because a removed source line of "---" renders
+    as "----" and would take a prefix test with it.
+    """
+    # islice(.., 2, None) drops the two file headers by position; both are absent
+    # entirely when there is no diff, and islice is fine with that.
+    diff = islice(
+        difflib.unified_diff(
+            old_text.splitlines(), new_text.splitlines(), lineterm="", n=3
+        ),
+        2,
+        None,
+    )
+    lines = list(islice(diff, RECONSTRUCTED_PATCH_LINES))
+    if next(diff, None) is not None:
+        lines.append(f"[rebuilt diff truncated at {RECONSTRUCTED_PATCH_LINES} lines]")
+    return "\n".join(lines)
 
 
 def is_unreviewable(f):
@@ -396,33 +454,6 @@ def is_unreviewable(f):
     return not f.get("patch") and not is_deleted(f) and f.get("changed_lines", 0) > 0
 
 
-def waive_blockers(raw, generated_globs=()):
-    """Reasons an empty corpus must NOT be waived, as human-readable strings.
-
-    A waive says "there is nothing here anyone could review". Two situations make
-    that claim unsafe even when the corpus really is empty: the PR editing the
-    very .gitattributes that decides what counts as generated, and a diff GitHub
-    refused to return, which is unreviewable rather than absent.
-
-    Generated files are exempt from the second check. A big lock file is exactly
-    the case where GitHub drops the patch, and it is also the case the waive
-    exists to serve - flagging it would block every lockfile-only PR.
-    """
-    reasons = []
-    if any(posixpath.basename(f["filename"]) == ".gitattributes" for f in raw):
-        reasons.append("the PR edits .gitattributes, which decides what is skipped")
-    oversized = [
-        f["filename"] for f in raw
-        if is_unreviewable(f) and not is_generated_path(f["filename"], generated_globs)
-    ]
-    if oversized:
-        reasons.append(
-            f"{len(oversized)} file(s) have changes GitHub would not return a diff "
-            f"for: {', '.join(oversized[:5])}"
-        )
-    return tuple(reasons)
-
-
 class PreparedDiff(NamedTuple):
     """What the job needs about a PR's diff, once the unreviewable parts are out."""
 
@@ -430,6 +461,7 @@ class PreparedDiff(NamedTuple):
     changed_lines: int  # sizing weight; NOT the PR's raw changed-line count
     skipped_generated: tuple  # dropped as machine-generated, for the log
     unreviewable: tuple  # real changes GitHub would not show, for the log
+    edits_gitattributes: bool  # the one reason an empty corpus may not be waived
 
 
 def prepare_files(raw, generated_globs=()):
@@ -443,7 +475,13 @@ def prepare_files(raw, generated_globs=()):
     weighs nothing, since the one thing worth asking about it is the consequence
     of the removal; and a patchless file cannot be put in front of anyone, so it
     is neither shown nor counted. Both kinds of drop are reported rather than
-    silent - see waive_blockers for the ones that must not end in a waive.
+    silent.
+
+    edits_gitattributes rides along because it is the one thing that makes an
+    empty corpus unsafe to waive: such a PR is rewriting the very rules the
+    emptiness was decided by. An undiffable change is deliberately not a second
+    reason - it lands in `unreviewable`, which fails the run outright, before a
+    waive is ever considered.
     """
     kept, skipped = [], []
     for f in raw:
@@ -486,6 +524,7 @@ def prepare_files(raw, generated_globs=()):
         total,
         tuple(f["filename"] for f in skipped),
         tuple(f["filename"] for f in kept if is_unreviewable(f)),
+        any(posixpath.basename(f["filename"]) == ".gitattributes" for f in raw),
     )
 
 
@@ -504,7 +543,13 @@ def chunk_files(files, budget=CHUNK_CHAR_BUDGET, max_chunks=MAX_CHUNKS):
     files carry zero changed_lines, so they never shift question allocation.
     """
     deleted = [f for f in files if is_deleted(f)]
-    reserve = max(1, budget // DELETED_BLOCK_SHARE) if deleted else 0
+    # Sized to the blocks that actually exist, capped at DELETED_BLOCK_SHARE.
+    # A flat share charged every chunk for room a two-line deletion never uses,
+    # which cost a big PR a third of the diff the model ever sees.
+    reserve = (
+        max(1, min(budget // DELETED_BLOCK_SHARE, deletions_size(deleted)))
+        if deleted else 0
+    )
     # floors at 1 so an absurdly small budget cannot make the slice below nonsense
     room = max(budget - reserve - 2, 1) if reserve else budget
     chunks = []

@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+import quiz_logic
 from quiz_logic import (
     DELETED_BLOCK_HEADER,
     MAX_QUESTIONS,
@@ -18,6 +19,7 @@ from quiz_logic import (
     deleted_file_text,
     deletion_block,
     deletion_references,
+    deletions_size,
     extract_text,
     is_generated_path,
     is_valid_repo,
@@ -25,7 +27,7 @@ from quiz_logic import (
     parse_gitattributes_generated,
     parse_glob_list,
     prepare_files,
-    waive_blockers,
+    render_patch,
     parse_ambiguity_verdicts,
     parse_difficulty,
     parse_distractors,
@@ -288,6 +290,28 @@ class TestConfiguredGlobs:
     def test_one_bad_entry_does_not_poison_the_rest(self):
         assert parse_glob_list("*, dist/*") == ("dist/*",)
 
+    @pytest.mark.parametrize("pattern", ["dist/", "/dist/", "dist/**"])
+    def test_a_directory_pattern_covers_its_contents(self, pattern):
+        # "dist/" alone normalized to the glob "dist", which only ever matched a
+        # FILE called dist - i.e. nothing, silently. Git reads the trailing slash
+        # as the directory's contents.
+        for path in ("dist/app.js", "dist/a/b.js", "web/dist/app.js"):
+            assert is_generated_path(path, parse_glob_list(pattern)), (pattern, path)
+        assert is_generated_path(path, parse_gitattributes_generated(
+            f"{pattern} linguist-generated"
+        ))
+
+    def test_a_directory_pattern_does_not_match_a_file_of_that_name(self):
+        # git's own rule: "dist/" is the directory, never a file called dist.
+        assert not is_generated_path("dist", parse_glob_list("dist/"))
+
+    def test_a_bare_name_stays_a_filename_match(self):
+        # Also git's rule: a slashless pattern matches a FILE of that name at any
+        # depth. Inventing the directory sense here would make the same line mean
+        # different things to git and to us - write "dist/" for the directory.
+        assert is_generated_path("a/b/dist", parse_glob_list("dist"))
+        assert not is_generated_path("dist/app.js", parse_glob_list("dist"))
+
     def test_gitattributes_honours_set_and_ignores_unset(self):
         text = (
             "# comment\n[attr]binary -diff\n"
@@ -324,43 +348,26 @@ class TestIsGeneratedPath:
         assert is_generated_path("Generated/Out.txt", ("generated/*",))
 
 
-class TestWaiveBlockers:
+class TestEditsGitattributes:
+    """The one flag that stops an empty corpus from being waived."""
+
     def _raw(self, name, changed=10, patch="@@\n+x", status="modified"):
         return {"filename": name, "status": status, "changed_lines": changed,
                 "patch": patch}
 
-    def test_ordinary_pr_has_no_blockers(self):
-        assert waive_blockers([self._raw("app.py")]) == ()
+    def test_an_ordinary_pr_is_not_flagged(self):
+        assert prepare_files([self._raw("app.py")]).edits_gitattributes is False
 
-    def test_editing_gitattributes_blocks_a_waive(self):
+    @pytest.mark.parametrize("name", [".gitattributes", "web/.gitattributes"])
+    def test_editing_gitattributes_is_flagged_at_any_depth(self, name):
         # Otherwise a PR could declare its own files generated and waive itself.
-        raw = [self._raw(".gitattributes"), self._raw("web/.gitattributes")]
-        assert len(waive_blockers(raw)) == 1
-        assert ".gitattributes" in waive_blockers(raw)[0]
+        assert prepare_files([self._raw(name)]).edits_gitattributes is True
 
-    def test_a_diff_github_would_not_return_blocks_a_waive(self):
-        # "pad the file until GitHub drops the patch" is otherwise a way through.
-        raw = [self._raw("src/huge.py", changed=9000, patch=None)]
-        blockers = waive_blockers(raw)
-        assert len(blockers) == 1
-        assert "src/huge.py" in blockers[0]
-
-    def test_a_generated_file_never_blocks_a_waive(self):
-        # A big lock file is exactly where GitHub drops the patch, and exactly
-        # the case the waive exists for: flagging it blocks every such PR.
-        raw = [self._raw("uv.lock", changed=3502, patch=None)]
-        assert waive_blockers(raw) == ()
-        assert waive_blockers([self._raw("dist/app.js", changed=900, patch=None)],
-                              ("dist/*",)) == ()
-
-    def test_a_binary_does_not_block_a_waive(self):
-        # GitHub reports zero changed lines for a binary; that is genuinely
-        # nothing to review, unlike an oversized text diff.
-        assert waive_blockers([self._raw("logo.png", changed=0, patch=None)]) == ()
-
-    def test_a_deleted_file_without_a_patch_does_not_block(self):
-        raw = [self._raw("gone.py", changed=80, patch=None, status="removed")]
-        assert waive_blockers(raw) == ()
+    def test_a_generated_gitattributes_is_still_flagged(self):
+        # Flagged from the raw records, before the generated filter runs: a glob
+        # covering .gitattributes must not be able to hide the edit to it.
+        diff = prepare_files([self._raw(".gitattributes")], (".gitattributes",))
+        assert (diff.files, diff.edits_gitattributes) == ([], True)
 
 
 class TestDeletionReferences:
@@ -399,9 +406,57 @@ class TestDeletionBlock:
 
     def test_overflowing_entries_lose_the_excerpt_but_keep_the_name(self):
         deleted = [self._deleted("a.py", 400), self._deleted("b.py", 400)]
-        block = deletion_block(deleted, len(DELETED_BLOCK_HEADER) + 410)
+        # room for the header, one excerpt, and the line naming the other
+        budget = len(DELETED_BLOCK_HEADER) + 500
+        block = deletion_block(deleted, budget)
         assert block.count("d" * 400) == 1
         assert "b.py" in block
+        assert len(block) <= budget
+
+    def test_the_naming_line_is_budgeted_too(self):
+        # It used to be appended after the fit loop, so a long list of names
+        # pushed the block past the budget chunk_files had handed out (measured
+        # overflow: +2,358 chars on a 10,000 budget).
+        deleted = [self._deleted(f"{'d' * 70}{i}.py", 900) for i in range(60)]
+        assert len(deletion_block(deleted, 10_000)) <= 10_000
+
+    def test_everything_fitting_costs_no_reserve(self):
+        deleted = [self._deleted("a.py", 400), self._deleted("b.py", 400)]
+        block = deletion_block(deleted, deletions_size(deleted))
+        assert block.count("d" * 400) == 2
+        assert "also deleted" not in block
+
+
+class TestRenderPatch:
+    """Rebuilding the diff GitHub declines to return for an oversized text file."""
+
+    def test_shape_matches_a_github_patch(self):
+        patch = render_patch("a\nb\nc\n", "a\nB\nc\n")
+        assert patch.startswith("@@")
+        assert "-b" in patch and "+B" in patch
+        # GitHub's patch text carries no ---/+++ file headers
+        assert not patch.startswith("---")
+        assert "+++ " not in patch
+
+    def test_identical_versions_give_no_patch(self):
+        assert render_patch("same\n", "same\n") == ""
+
+    def test_added_file_renders_as_all_additions(self):
+        patch = render_patch("", "new line\n")
+        assert "+new line" in patch
+
+    def test_a_removed_line_of_dashes_survives_header_stripping(self):
+        # Stripping the file headers by prefix would eat this: "---" renders as
+        # "----", and a removed "+++x" as "++++x".
+        patch = render_patch("---\n+++x\nkeep\n", "keep\n")
+        assert "----" in patch
+        assert "-+++x" in patch
+
+    def test_long_diff_is_capped_and_says_so(self, monkeypatch):
+        monkeypatch.setattr(quiz_logic, "RECONSTRUCTED_PATCH_LINES", 10)
+        patch = render_patch("\n".join(str(i) for i in range(500)), "")
+        assert len(patch.splitlines()) == 11  # 10 diff lines + the truncation marker
+        assert "truncated at 10 lines" in patch
 
 
 class TestPrepareFiles:
@@ -458,6 +513,22 @@ class TestPrepareFiles:
         assert diff.changed_lines == 10
         assert diff.unreviewable == ("src/huge.py",)
 
+    def test_a_patchless_generated_file_is_not_flagged_undiffable(self):
+        # A big lock file is exactly where GitHub drops the patch, and exactly
+        # the case a waive exists for: flagging it would fail every such PR.
+        assert prepare_files([self._raw("uv.lock", changed=3502, patch=None)]) \
+            .unreviewable == ()
+        assert prepare_files([self._raw("dist/app.js", changed=900, patch=None)],
+                             ("dist/*",)).unreviewable == ()
+
+    def test_a_patchless_deletion_is_not_flagged_undiffable(self):
+        # GitHub returns no patch for a large removal; the file is still kept as
+        # deletion context, so there is nothing unreviewable about it.
+        diff = prepare_files([self._raw("gone.py", status="removed", changed=80,
+                                        patch=None)])
+        assert diff.unreviewable == ()
+        assert [f["filename"] for f in diff.files] == ["gone.py"]
+
     def test_an_all_generated_pr_yields_an_empty_corpus(self):
         diff = prepare_files([self._raw("uv.lock", changed=4000)])
         assert (diff.files, diff.changed_lines) == ([], 0)
@@ -513,7 +584,7 @@ class TestChunkFiles:
             self._file("a.py", 400),
             self._file("b.py", 400),
         ]
-        chunks = chunk_files(files, budget=900)
+        chunks = chunk_files(files, budget=700)
         assert len(chunks) == 2
         assert [c["filenames"] for c in chunks] == [["a.py"], ["gone.py", "b.py"]]
         assert sum(c["text"].count("d" * 40) for c in chunks) == 1
@@ -524,7 +595,7 @@ class TestChunkFiles:
             self._file("docs/x.md", 400),
             self._file("src/api/keep.py", 400),
         ]
-        chunks = chunk_files(files, budget=900)
+        chunks = chunk_files(files, budget=700)
         assert chunks[1]["filenames"] == ["src/api/gone.py", "src/api/keep.py"]
 
     def test_deletions_do_not_change_chunk_weights(self):
@@ -543,6 +614,17 @@ class TestChunkFiles:
         assert len(chunk_files(survivors, budget=660)) == 1
         # ...but not once the deletion reserve is taken out of the same budget
         assert len(chunk_files([self._deleted("gone.py", 100)] + survivors, budget=660)) == 2
+
+    def test_a_small_deletion_does_not_cost_a_share_it_never_uses(self):
+        # The reserve used to be a flat budget // DELETED_BLOCK_SHARE the moment
+        # any deletion existed, so one tiny deleted file cost a big PR a third of
+        # the diff the model ever sees (measured: 145,000 -> 100,079 chars).
+        survivors = [self._file(f"f{i}.py", 29_000) for i in range(8)]
+        alone = sum(len(c["text"]) for c in chunk_files(survivors))
+        with_deletion = sum(
+            len(c["text"]) for c in chunk_files([self._deleted("gone.py", 50)] + survivors)
+        )
+        assert with_deletion >= alone
 
 
 class TestAllocateQuestions:

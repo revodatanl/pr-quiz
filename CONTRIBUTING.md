@@ -137,14 +137,14 @@ to act, never to skip or weaken the assertion.
 
 ## Testing with fixture PRs
 
-`just fixture-prs [small medium large generated deleted]` (re)creates
+`just fixture-prs [small medium large generated deleted waived]` (re)creates
 deterministic PRs that exercise the pipeline end to end. Content comes from
 [scripts/gen_fixture_pr.py](scripts/gen_fixture_pr.py), written to
 `fixtures/sandbox/` on `fixture/*` branches (never on `main`). Needs a clean
 working tree and the same GitHub token as the recipes above.
 
 ```bash
-just fixture-prs              # (re)create all five, in dependency order
+just fixture-prs              # (re)create all six, in dependency order
 just fixture-clean            # close open fixture/* PRs, delete their branches
 ```
 

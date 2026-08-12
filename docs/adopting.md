@@ -181,16 +181,15 @@ The quiz only covers changes a reviewer is expected to read. Three consequences:
 
 - **Generated files are skipped**, and don't count toward the question count. A
   4,000-line lockfile next to a 6-line code change gives you a quiz about the 6
-  lines. Same for binary files and any diff GitHub declines to show.
+  lines. Same for binary files.
 - **A deleted file is worth one question**, about the consequences of removing
   it, answered from the code that remains. Its removed lines don't count either,
   so a delete-only PR gets a 1-question quiz.
 - **A PR with nothing left to quiz passes automatically**, with a `quiz-gate`
   status reading "Quiz waived: no reviewable changes in this PR" and no quiz
-  link. Otherwise a PR that only bumps `uv.lock` could never merge. Two things
-  block that waive: a PR editing `.gitattributes`, and a file GitHub returns no
-  diff for despite real changed lines. Both fail the run instead, so neither
-  becomes a way past the gate.
+  link. Otherwise a PR that only bumps `uv.lock` could never merge. A PR editing
+  `.gitattributes` never gets that waive — it fails the run instead, so declaring
+  your own files generated cannot become a way past the gate.
 
 A file counts as generated if it matches the built-in list (lock files, minified
 bundles, source maps, test snapshots, codegen output, `vendor/`,
@@ -198,12 +197,22 @@ bundles, source maps, test snapshots, codegen output, `vendor/`,
 it matches `QUIZ_GENERATED_GLOBS`. Patterns apply at any depth and ignore case,
 so `dist/*` also covers `web/dist/app.js`.
 
+Patterns follow git's own reading, so a directory needs the trailing slash:
+`dist/` (or `dist/*`) is the directory's contents, while a bare `dist` matches a
+*file* called `dist` at any depth.
+
 To add your own:
 
 ```gitattributes
 # .gitattributes - also makes GitHub collapse the file
 src/api/schema.json linguist-generated=true
+dist/                                        # the whole directory
 ```
+
+**`.gitattributes` is read from the base branch, not from the PR.** A PR that
+adds or edits declarations does not get them applied to its own quiz — otherwise
+the change under review would be choosing which parts of itself get reviewed.
+Merge the declaration first; it applies from the next PR on.
 
 ## Limits and gotchas
 
@@ -213,9 +222,19 @@ src/api/schema.json linguist-generated=true
   questions than needed remain after all rounds.
 - **A very large PR is only partly quizzed.** The diff is split into at most 5
   chunks of 30,000 characters, so roughly 150,000 characters reach the model;
-  anything past that is dropped but still counts toward the question count. A
-  single file whose diff GitHub refuses to return cannot be quizzed at all — the
-  job logs it as a warning.
+  anything past that is dropped but still counts toward the question count. When
+  the PR deletes files, their context is carved out of that same budget, up to a
+  third of it.
+- **A text diff GitHub won't show is rebuilt, not dropped.** GitHub returns no
+  patch for a text diff it considers too large; the job fetches the file's two
+  versions and rebuilds the patch itself, capped like any other. The change stays
+  in the quiz and keeps counting. Binary changes are the opposite case — there is
+  nothing to ask about, so they leave the corpus and the count, like generated
+  files. The run fails only when a *text* change can't be rebuilt either: the
+  file is over 4 MB, isn't valid UTF-8, or GitHub wouldn't serve it. Then it
+  fails naming the file rather than quizzing around it, because dropping it would
+  take its changed lines out of the question count. Split the change, or declare
+  the path generated.
 - PRs at roughly 4,000+ changed lines skip the difficulty judge — the model call
   that rates how hard a diff is to review and scales the question count.
   Skipping it is safe because diff size alone already caps the count at 20.
@@ -248,6 +267,11 @@ src/api/schema.json linguist-generated=true
   (`QUIZ_WAIVE_AUTHORS`). `/quiz-check` re-confirms either one.
 - **The quiz is shorter than the diff suggests.** Either the difficulty judge
   rated the diff easy, or part of it was skipped — see [Skipped
+  files](#skipped-files). The job log names every file it skipped as generated,
+  so that list tells you which.
+- **My new `linguist-generated` line had no effect.** Two usual causes: it is
+  read from the base branch, so it only applies from the next PR onward, and a
+  directory needs its trailing slash (`dist/`, not `dist`). See [Skipped
   files](#skipped-files).
 - **Set `QUIZ_WAIVE_AUTHORS` on both caller workflows.** The gate caller applies
   the author waive too; setting it only on the generate caller leaves

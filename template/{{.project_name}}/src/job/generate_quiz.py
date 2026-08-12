@@ -61,7 +61,8 @@ from quiz_logic import (
     skip_difficulty_judge,
     widen_spacing,
 )
-from diff_providers import SUPPORTED_PROVIDERS, get_provider
+import github_diff
+import github_status
 
 DIFF_CHAR_LIMIT = 150_000
 MAX_TOKENS_PER_BATCH = 8000  # gpt-oss spends output tokens on reasoning; 4500 truncated 20-question JSON
@@ -558,17 +559,17 @@ def main():
     if not is_valid_repo(args.repo):
         raise SystemExit("repo job parameter must be owner/name (or org/project/repo), "
                          f"got {args.repo!r}")
-    if args.provider not in SUPPORTED_PROVIDERS:
-        raise SystemExit(f"provider job parameter must be one of {sorted(SUPPORTED_PROVIDERS)}, "
-                         f"got {args.provider!r}")
+    # Still a real column on both tables, so it stays a job parameter - but
+    # GitHub is the only implementation. A second SCM adds its branch here.
+    if args.provider != "github":
+        raise SystemExit(f"provider job parameter must be 'github', got {args.provider!r}")
 
     job_started = time.monotonic()
     log(f"quiz generation for PR #{args.pr_number} @ {args.head_sha[:8]} "
         f"(endpoint={args.endpoint}, table={args.table})")
     w = WorkspaceClient()
-    provider_impl = get_provider(args.provider)
-    token = provider_impl.get_token(w, args.secret_scope, args.secret_key)
-    declared_globs = provider_impl.fetch_generated_globs(args.repo, args.head_sha, token)
+    token = github_diff.get_github_token(w, args.secret_scope, args.secret_key)
+    declared_globs = github_diff.fetch_generated_globs(args.repo, args.pr_number, token)
     if declared_globs:
         log(f"repo declares {len(declared_globs)} generated path glob(s): "
             f"{', '.join(declared_globs)}")
@@ -577,9 +578,7 @@ def main():
         # unanswerable from the log
         log("no readable .gitattributes linguist-generated declarations")
     generated_globs = parse_glob_list(args.generated_globs) + declared_globs
-    diff, blockers = provider_impl.fetch_pr_diff(
-        args.repo, args.pr_number, token, generated_globs
-    )
+    diff = github_diff.fetch_pr_diff(args.repo, args.pr_number, token, generated_globs)
     files, changed_lines = diff.files, diff.changed_lines
     if diff.skipped_generated:
         # named, not just counted: "why was my file not quizzed" is otherwise
@@ -587,16 +586,25 @@ def main():
         log(f"skipped {len(diff.skipped_generated)} generated file(s): "
             f"{', '.join(diff.skipped_generated)}")
     if diff.unreviewable:
-        log(f"WARNING: {len(diff.unreviewable)} file(s) changed but GitHub returned "
-            f"no diff for them, so they cannot be quizzed: "
-            f"{', '.join(diff.unreviewable)}")
-    if not files and blockers:
-        # An empty corpus normally means nothing was reviewable, but these say the
-        # opposite: content exists and we cannot see it. Waiving here is the
-        # bypass ("pad the diff until GitHub drops it"), so fail instead.
+        # Not a warning. github_diff already tried to rebuild these from their
+        # blobs and could not, so they would leave the corpus AND the sizing -
+        # which is the "pad a file until GitHub stops diffing it" bypass,
+        # whether or not the rest of the PR happens to be quizzable.
         raise SystemExit(
-            f"PR #{args.pr_number} has no quizzable files, but cannot be waived: "
-            + "; ".join(blockers)
+            f"PR #{args.pr_number} changes {len(diff.unreviewable)} file(s) that GitHub "
+            f"will not diff and the job could not rebuild: {', '.join(diff.unreviewable)}. "
+            "Split the change, or declare the path generated on the base branch "
+            "(.gitattributes linguist-generated, or QUIZ_GENERATED_GLOBS)."
+        )
+    if not files and diff.edits_gitattributes:
+        # An empty corpus normally means nothing was reviewable. A PR editing
+        # .gitattributes is the case where that claim cannot be trusted: it is
+        # rewriting the very rules the emptiness was decided by. Fail instead of
+        # waiving, so declaring your own files generated is never a way through.
+        # (The undiffable reason already raised above, corpus empty or not.)
+        raise SystemExit(
+            f"PR #{args.pr_number} has no quizzable files, but cannot be waived: the "
+            "PR edits .gitattributes, which decides what is skipped."
         )
     if not files:
         # Nothing a reviewer is expected to have read. Failing here would leave
@@ -606,7 +614,7 @@ def main():
         # gate that stays pending forever.
         write_waiver(args.results_table, args.provider, args.repo, args.head_sha,
                      args.pr_number)
-        provider_impl.post_commit_status(
+        github_status.post_commit_status(
             args.repo, args.head_sha, "success",
             "Quiz waived: no reviewable changes in this PR",
             args.status_context, token,

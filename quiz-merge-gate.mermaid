@@ -27,6 +27,12 @@ flowchart TB
     %%   on the consequences of removing it — neither adds to the
     %%   size N is computed from. A PR with nothing quizzable left
     %%   WAIVES the gate rather than failing it.
+    %% - Generated paths come from the repo's .gitattributes at the
+    %%   PR's BASE commit, never its head: the change under review
+    %%   must not choose which parts of itself get reviewed.
+    %% - A text diff GitHub declines to return is REBUILT from the
+    %%   file's two versions so it still counts toward N. One that
+    %%   cannot be rebuilt fails the run — it is never waived.
     %% - Question count N scales with reviewable PR size AND
     %%   AI-judged difficulty (factor 0.2 – 5.0): N = size ×
     %%   difficulty, clamped 1 – 20. Very large diffs skip the judge
@@ -60,7 +66,7 @@ flowchart TB
         NewCommitCheck{"Event = new commit<br>(synchronize)?"}
         MarkStalePending["mark-stale: set gate pending<br>on new head SHA"]
         SetGatePending["Set gate status pending<br>(quiz being generated)"]
-        FilterUnreviewable["Drop generated files (built-in list,<br>.gitattributes, configured globs);<br>deleted files → impact only, zero size"]
+        FilterUnreviewable["Rebuild any diff GitHub withheld;<br>drop generated files (built-in list,<br>base .gitattributes, configured globs);<br>deleted files → impact only, zero size"]
         QuizzableCheck{"Anything<br>reviewable left?"}
         WaiveNoContent(["Post passing gate status<br>(waived — nothing reviewable)"])
         AnalyzeDiffSize["Analyze reviewable diff size"]
@@ -111,7 +117,7 @@ flowchart TB
         NewCommitCheck -->|"No — open/reopen or /quiz"| SetGatePending
         SetGatePending --> FilterUnreviewable
         FilterUnreviewable --> QuizzableCheck
-        QuizzableCheck -->|"No — all generated,<br>binary or undiffable"| WaiveNoContent
+        QuizzableCheck -->|"No — all generated<br>or binary"| WaiveNoContent
         QuizzableCheck -->|"Yes"| AnalyzeDiffSize
         AnalyzeDiffSize --> JudgeSkipCheck
         JudgeSkipCheck -->|"No"| JudgeDifficulty
