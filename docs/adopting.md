@@ -227,7 +227,9 @@ To add your own patterns, edit `.gitattributes`:
 ```gitattributes
 # .gitattributes - GitHub also collapses the file
 src/api/schema.json linguist-generated=true
-dist/                                        # the whole directory
+# every path needs the attribute, and git reads a whole line as a comment only
+# when it starts with "#" - a trailing "#" is part of the rule
+dist/ linguist-generated=true
 ```
 
 **The job reads `.gitattributes` from the base branch, not from the PR.** A PR
@@ -272,8 +274,7 @@ a reviewer sees. Merge the declaration first. It applies from the next PR.
   between a person and the repo, for example `OWNER`, `MEMBER`, or
   `COLLABORATOR`. The allowed list is `OWNER,MEMBER,COLLABORATOR` by default.
 - **The gate step fails with an empty or unclear Databricks error.**
-  `QUIZ_WAREHOUSE_ID` has no value. The gate caller makes sure that this
-  variable has a value, and it tells you to set the variable.
+  `QUIZ_WAREHOUSE_ID` has no value, or its value names no warehouse.
 - **The run reports "Could not resolve the quiz app URL".** The `app_name` input
   does not match a deployed app, or the CLI cannot see that app. Give the
   `app_url` input a value.

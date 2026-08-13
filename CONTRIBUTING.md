@@ -159,7 +159,8 @@ just fixture-clean            # close open fixture/* PRs, delete their branches
 - **generated** — a ~3,500-line fake `uv.lock` plus a 12-line docs change;
   expect `N=1`, not the `N=20` the lock file's line count alone would force.
 - **deleted** — deletes two of `medium`'s modules and rewrites `orders.py` to
-  stop importing them; expect one impact question per deleted file. Branches off
+  stop importing them; expect at most one impact question per deleted file, and
+  an N sized from the `orders.py` rewrite alone — deletions weigh zero. Branches off
   `fixture/medium` (a diff only marks a file deleted if it exists on the base),
   so build `medium` first and drive this one with `just run-job` — its base is
   not `main`, so `/quiz` skips it.

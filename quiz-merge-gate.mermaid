@@ -28,7 +28,9 @@ flowchart TB
     %%   trees, code generation output). For a deleted file, the
     %%   quiz asks only about the result of the removal. Neither
     %%   type adds to the size N. If nothing reviewable remains,
-    %%   the run waives the gate. It does not fail the gate.
+    %%   the run waives the gate. It fails only if the PR also
+    %%   edits .gitattributes, because that PR rewrites the rules
+    %%   that emptied the diff.
     %% - The list of generated paths comes from .gitattributes at
     %%   the base commit of the PR, never at the head commit. The
     %%   change under review must not select its own review scope.

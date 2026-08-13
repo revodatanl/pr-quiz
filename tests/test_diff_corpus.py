@@ -1,4 +1,7 @@
 """Turning a PR diff into the quizzable corpus: generated paths, deletions, chunking."""
+import re
+from pathlib import Path
+
 import pytest
 
 import diff_corpus
@@ -78,6 +81,20 @@ class TestConfiguredGlobs:
             "* text=auto\n"
         )
         assert parse_gitattributes_generated(text) == ("*.lock", "schema.json")
+
+    def test_the_gitattributes_example_in_the_docs_actually_works(self):
+        # Drift guard, like tests/test_ddl_sync.py: this snippet is what adopters
+        # copy, and a rule git silently ignores costs them their whole quiz. It
+        # shipped once as a bare "dist/" with a trailing "#" comment, which
+        # declares nothing at all.
+        docs = (Path(__file__).resolve().parents[1] / "docs" / "adopting.md").read_text(
+            encoding="utf-8"
+        )
+        example = re.search(r"```gitattributes\n(.*?)```", docs, re.DOTALL)
+        assert example, "no gitattributes example in docs/adopting.md"
+        globs = parse_gitattributes_generated(example.group(1))
+        assert is_generated_path("src/api/schema.json", globs)
+        assert is_generated_path("web/dist/app.js", globs)
 
 
 class TestIsGeneratedPath:

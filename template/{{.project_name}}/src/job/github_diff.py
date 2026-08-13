@@ -11,9 +11,12 @@ from diff_corpus import (
 )
 
 API = "https://api.github.com"
-# Guards the difflib pass, not the download: SequenceMatcher on a pair of
-# multi-megabyte files costs minutes to build a patch that
-# RECONSTRUCTED_PATCH_LINES truncates anyway.
+# This cap guards the difflib pass, not the download: SequenceMatcher on two
+# multi-megabyte files costs minutes. The job rebuilds only a file that GitHub
+# refused to diff, and GitHub refuses on patch size. A big file with a few edits
+# keeps its patch and never reaches this cap. A file that reaches it has a patch
+# RECONSTRUCTED_PATCH_LINES truncates anyway, and stays unreviewable, which
+# fails the run.
 MAX_BLOB_BYTES = 4 * 1024 * 1024
 
 
