@@ -466,16 +466,13 @@ WAIVED_TAKER = "waived: no reviewable changes"
 def write_waiver(results_table, provider, repo, head_sha, pr_number):
     """Record a waived commit as a passing, zero-question result.
 
-    The gate reads quiz_results, not commit statuses, so a waive that only posted
-    a status is forgotten the moment anyone runs /quiz-check. `n_questions = 0`
-    marks the row as a waiver: a real attempt always asks at least one question.
-    INSERT, not saveAsTable - an append to a missing table would create it with
-    this statement's schema and drift from sql/init_tables.sql.
+    The gate reads quiz_results, not commit statuses, so a status-only waive is
+    forgotten the moment anyone runs /quiz-check. `n_questions = 0` marks the row
+    as a waiver, because a real attempt always asks at least one question.
 
-    Idempotent per (provider, repo, head_sha) like write_pool, so re-running /quiz
-    on a waived PR replaces the waiver instead of stacking copies. The delete is
-    narrowed to waiver rows: a real attempt on this commit is somebody's result
-    and is never ours to remove.
+    Idempotent per (provider, repo, head_sha) like write_pool. The delete is
+    narrowed to waiver rows: a real attempt on this commit is somebody's result,
+    never ours to remove.
     """
     from databricks.connect import DatabricksSession
 
@@ -486,6 +483,8 @@ def write_waiver(results_table, provider, repo, head_sha, pr_number):
         "AND provider = :provider AND n_questions = 0",
         args=key,
     )
+    # INSERT, not saveAsTable: an append would create a missing table with this
+    # statement's schema and drift from sql/init_tables.sql.
     spark.sql(
         f"INSERT INTO {results_table} "
         "(provider, repo, head_sha, pr_number, taker, score_pct, n_questions, passed, "

@@ -1,7 +1,7 @@
 """Pure quiz-generation logic (no I/O) - unit-tested in tests/test_quiz_logic.py.
 
-Sizing, request pacing and model-output parsing. Turning the PR's diff into the
-corpus these questions are asked about is diff_corpus.py.
+Sizing, request pacing and model-output parsing. diff_corpus.py turns the PR's
+diff into the corpus these questions are asked about.
 """
 import json
 import math
@@ -47,7 +47,7 @@ def skip_difficulty_judge(changed_lines):
 
 
 def _load(raw):
-    """json.loads, but a parse failure is the ValueError every caller retries on."""
+    """json.loads, but a parse failure raises the ValueError callers retry on."""
     try:
         return json.loads(raw)
     except json.JSONDecodeError as e:
@@ -55,11 +55,11 @@ def _load(raw):
 
 
 def parse_difficulty(raw):
-    """Validate a difficulty-judge response; return the factor clamped into
-    [MIN_DIFFICULTY_FACTOR, MAX_DIFFICULTY_FACTOR].
+    """Validate a difficulty-judge response and return the clamped factor.
 
-    Raises ValueError on unparseable JSON or a missing/non-numeric/non-finite
-    difficulty_factor, so the caller can retry.
+    Clamped into [MIN_DIFFICULTY_FACTOR, MAX_DIFFICULTY_FACTOR]. Raises ValueError
+    on unparseable JSON or a missing, non-numeric or non-finite difficulty_factor,
+    so the caller can retry.
     """
     payload = _load(raw)
     factor = payload.get("difficulty_factor") if isinstance(payload, dict) else None

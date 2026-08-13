@@ -127,9 +127,8 @@ def load_pool(head_sha, repo=None):
                 FROM {POOL_TABLE} WHERE head_sha = %(sha)s""",
             {"sha": head_sha},
         )
-    # Rows are read by column name (the connector's Row is field-accessible), so
-    # reordering a SELECT list cannot silently shift values into wrong keys - a
-    # renamed column raises AttributeError here instead.
+    # Read by column name: reordering the SELECT list cannot shift values into the
+    # wrong keys, and a renamed column raises AttributeError here.
     return [
         {
             "provider": r.provider,

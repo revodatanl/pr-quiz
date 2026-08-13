@@ -49,9 +49,8 @@ def is_waiver(row: list) -> bool:
     """True when the row records a waive rather than a quiz someone sat.
 
     The job writes a passing, zero-question row when a PR has nothing quizzable.
-    A real attempt always asks at least one question. Anything that is not a
-    readable question count - a short row, a NULL, a non-numeric value - reads as
-    an attempt, so a waive is only ever claimed on an explicit zero.
+    A real attempt always asks at least one question. An unreadable question count
+    reads as an attempt, so only an explicit zero counts as a waive.
     """
     try:
         return int(row[3]) == 0

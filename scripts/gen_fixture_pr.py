@@ -10,10 +10,10 @@ branches regenerate idempotently. Fixtures map to quiz-pipeline behaviors:
 - generated: a ~3500-line fake uv.lock plus a 12-line docs change -> the lock
           file is skipped and does not size the quiz, so N stays 1 not 20
 - waived: the lock file alone -> nothing quizzable, so the gate is waived
-- deleted: deletes inventory.py and pricing.py and rewrites orders.py to stop
-          importing them, exercising the reference hints against a real
-          surviving caller. Not standalone: generate and commit medium first,
-          or there is nothing to remove.
+- deleted: deletes inventory.py and pricing.py, and rewrites orders.py to stop
+          importing them, so the reference hints run against a real surviving
+          caller. Not standalone: generate and commit medium first, or there is
+          nothing to remove.
 """
 import argparse
 from pathlib import Path

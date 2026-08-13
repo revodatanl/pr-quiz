@@ -1,8 +1,7 @@
 """A PR diff turned into a quizzable corpus (no I/O).
 
-Decides what a reviewer is asked to look at: which paths are machine-generated,
-which changes GitHub will not show, how a deletion travels with the code that
-explains it, and how the rest is cut into per-prompt chunks. github_diff.py
+Decides what a reviewer is asked to look at: which paths are generated, which
+changes GitHub will not show, and where the chunk boundaries fall. github_diff.py
 does the fetching. Unit-tested in tests/test_diff_corpus.py.
 """
 import difflib
@@ -53,14 +52,9 @@ GENERATED_PATH_GLOBS = (
 def _expand_glob(pattern):
     """Normalize one configured path pattern onto what is_generated_path matches.
 
-    Shared by the adopter's globs and the repo's .gitattributes, so a pattern means
-    the same thing wherever it is written. Anchoring is not reproduced. "**" expands
-    to both the zero-directory and the one-or-more-directory form.
-
-    A trailing slash means the directory's contents, the way git reads it. Without
-    one, git matches a file of that name at any depth, so "dist" is not "dist/".
-
-    Returns 0, 1 or 2 globs.
+    Used for both the adopter's globs and the repo's .gitattributes, so a pattern
+    means the same thing in either place. Anchoring is not reproduced. "**" expands
+    to two globs: zero directories, and one or more. Returns 0, 1 or 2 globs.
     """
     stripped = pattern.strip()
     glob = stripped.strip("/")
@@ -71,7 +65,8 @@ def _expand_glob(pattern):
     if glob.endswith("/**"):
         glob = glob[:-3] + "/*"
     if stripped.endswith("/") and not glob.endswith("*"):
-        # Otherwise the glob only matches a FILE called "dist", i.e. nothing.
+        # A trailing slash means the directory's contents, the way git reads it.
+        # Otherwise the glob only matches a FILE called "dist", which is nothing.
         glob += "/*"
     expanded = (
         (glob.replace("/**/", "/"), glob.replace("/**/", "/*/"))
@@ -102,8 +97,8 @@ def _path_variants(path):
 def is_generated_path(path, extra_globs=()):
     """True when `path` looks machine-generated rather than authored.
 
-    fnmatchcase over a pre-lowered path, never fnmatch: fnmatch normcases via the
-    HOST os, so a glob would behave differently on Windows and on the Linux job.
+    Always fnmatchcase over a pre-lowered path, never fnmatch: fnmatch case-folds
+    per the HOST os, so one glob would behave differently on Windows and on Linux.
     """
     globs = GENERATED_PATH_GLOBS + tuple(g.lower() for g in extra_globs)
     variants = _path_variants(path.lower())
@@ -115,9 +110,8 @@ def is_generated_path(path, extra_globs=()):
 def parse_gitattributes_generated(text):
     """Globs a .gitattributes marks as linguist-generated, in file order.
 
-    A repo that already declares its generated paths gets them skipped with no
-    extra configuration. Only the forms that SET the attribute count; the unset
-    forms ("-linguist-generated", "=false") are skipped.
+    Only the forms that SET the attribute count. The unset forms
+    ("-linguist-generated", "=false") are skipped.
     """
     globs = []
     for raw_line in text.splitlines():
@@ -140,10 +134,9 @@ def is_deleted(f):
 def deletion_references(deleted_path, others):
     """Paths among `others` [(filename, patch)] whose patch text mentions `deleted_path`.
 
-    A hint, not a proof: a file that stopped importing the deleted module is the
-    whole answer to "what does removing this break", and a substring search finds
-    it without a model call. Blind to re-exports, dynamic imports and files the PR
-    never touched.
+    A hint, not a proof. A substring search finds the caller that stopped importing
+    the deleted module, without a model call. It is blind to re-exports, dynamic
+    imports, and files the PR never touched.
     """
     base = posixpath.basename(deleted_path)
     stem = base.rsplit(".", 1)[0] if "." in base else base
@@ -198,9 +191,9 @@ def deletion_block(deleted, budget):
     """The deletion context chunk_files prepends to the chunk they belong with.
 
     A file whose excerpt does not fit is still named, and that naming line is
-    budgeted too: chunk_files hands out the rest of the chunk on the promise that
-    this block fits `budget`. The reserve assumes the worst case, every file named,
-    so the line that renders can only be shorter.
+    budgeted too: chunk_files spends the rest of the chunk on the promise that this
+    block fits `budget`. The reserve assumes every file is named, so the rendered
+    line can only be shorter.
     """
     if not deleted:
         return ""
@@ -225,10 +218,9 @@ def deletion_block(deleted, budget):
 def render_patch(old_text, new_text):
     """A capped unified diff of two file versions, shaped like GitHub's `patch`.
 
-    GitHub omits `patch` for a text diff it considers too large. Rebuilding it keeps
-    that change inside the corpus AND inside the question count. Dropping it also
-    dropped its changed lines from the sizing, which made "pad a file until GitHub
-    stops diffing it" a way past the gate.
+    GitHub omits `patch` for a text diff it considers too large. Rebuilding keeps
+    that change in the corpus and in the question count. Without it, padding a file
+    until GitHub stops diffing it is a way past the gate.
     """
     # islice(.., 2, None) drops the ---/+++ header lines by POSITION. A prefix test
     # would also eat a removed source line of "---", which renders as "----".
@@ -249,9 +241,9 @@ def render_patch(old_text, new_text):
 def is_unreviewable(f):
     """True when a patchless record is real content GitHub would not show.
 
-    GitHub omits `patch` for two reasons and reports them differently: a binary file
-    comes back with zero changed lines, a too-large text diff keeps its real line
-    counts. Only the second is source someone was meant to review.
+    GitHub omits `patch` for two reasons and reports them differently. A binary file
+    comes back with zero changed lines. A too-large text diff keeps its real counts,
+    and only that one is source someone was meant to review.
     """
     return not f.get("patch") and not is_deleted(f) and f.get("changed_lines", 0) > 0
 
@@ -274,11 +266,8 @@ def prepare_files(raw, generated_globs=()):
 
     Only changes a reviewer is asked to understand reach the corpus or the weight.
     Generated content is dropped. A deleted file is kept as context but weighs
-    nothing, since the only question worth asking is what the removal breaks. A
+    nothing, because the only question worth asking is what the removal breaks. A
     patchless file is neither shown nor counted. Both drops are reported.
-
-    edits_gitattributes rides along because it is the one thing that makes an empty
-    corpus unsafe to waive: such a PR rewrites the rules the emptiness came from.
     """
     kept, skipped = [], []
     for f in raw:
@@ -332,11 +321,9 @@ def chunk_files(files, budget=CHUNK_CHAR_BUDGET, max_chunks=MAX_CHUNKS):
     max_chunks chunks exist, files that do not fit the last chunk are dropped, which
     bounds the number of model calls.
 
-    Each deleted file goes into ONE chunk: the one holding a surviving file that
-    referenced it, else the closest by path. Its impact is only visible against the
-    code that remains, and repeating it in every chunk would buy the same question
-    several times. Deleted files carry zero changed_lines, so they never shift
-    question allocation.
+    Each deleted file goes into ONE chunk, picked by assign_deletion. Repeating it
+    in every chunk would buy the same question several times. Deleted files carry
+    zero changed_lines, so they never shift question allocation.
     """
     deleted = [f for f in files if is_deleted(f)]
     # Sized to the blocks that exist, capped at DELETED_BLOCK_SHARE. A flat share
@@ -385,8 +372,8 @@ def chunk_files(files, budget=CHUNK_CHAR_BUDGET, max_chunks=MAX_CHUNKS):
 def assign_deletion(deleted, chunk_filenames):
     """Index of the chunk a deleted file belongs with.
 
-    A chunk that changed a file referencing the deletion wins outright - that pairing
-    is the answer to what the removal broke. Failing that, the chunk sharing the
+    A chunk that changed a file referencing the deletion wins outright: that pairing
+    is the answer to what the removal broke. Otherwise, the chunk that shares the
     longest directory prefix.
     """
     for i, names in enumerate(chunk_filenames):

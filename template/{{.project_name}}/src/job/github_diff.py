@@ -11,12 +11,9 @@ from diff_corpus import (
 )
 
 API = "https://api.github.com"
-# This cap guards the difflib pass, not the download: SequenceMatcher on two
-# multi-megabyte files costs minutes. The job rebuilds only a file that GitHub
-# refused to diff, and GitHub refuses on patch size. A big file with a few edits
-# keeps its patch and never reaches this cap. A file that reaches it has a patch
-# RECONSTRUCTED_PATCH_LINES truncates anyway, and stays unreviewable, which
-# fails the run.
+# Guards the difflib pass, not the download: SequenceMatcher on two multi-megabyte
+# files costs minutes. A big file with few edits keeps its GitHub patch and never
+# reaches this cap. A file that does reach it stays unreviewable, which fails the run.
 MAX_BLOB_BYTES = 4 * 1024 * 1024
 
 
@@ -50,9 +47,9 @@ def _pr_refs(repo, pr_number, token):
 def fetch_generated_globs(repo, pr_number, token):
     """Globs the repo's .gitattributes marks linguist-generated, read at the PR's BASE.
 
-    Never at the head: there, a PR could mark its own source generated and
-    shrink its own quiz. A missing or unreadable file is a reason to quiz
-    normally, never to fail the run.
+    Never at the head: there, a PR can mark its own source generated and shrink
+    its own quiz. A missing or unreadable file is a reason to quiz normally,
+    never to fail the run.
     """
     base_sha, _ = _pr_refs(repo, pr_number, token)
     if not base_sha:
@@ -107,14 +104,12 @@ def _restore_missing_patches(repo, pr_number, raw, token):
     Only records is_unreviewable flags are touched, so an ordinary PR costs no
     extra requests. What cannot be rebuilt keeps its missing patch and is
     reported by prepare_files.
-
-    ponytail: diffs against the PR's base commit, not the merge base - one API
-    call rather than three. Resolve compare/{base}...{head} ->
-    merge_base_commit.sha if base-branch drift starts to matter.
     """
     targets = [f for f in raw if is_unreviewable(f)]
     if not targets:
         return
+    # ponytail: base commit, not the merge base - one API call instead of three.
+    # Resolve compare/{base}...{head} -> merge_base_commit.sha if drift matters.
     base_sha, head_sha = _pr_refs(repo, pr_number, token)
     if not (base_sha and head_sha):
         return
