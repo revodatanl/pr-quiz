@@ -127,17 +127,19 @@ def load_pool(head_sha, repo=None):
                 FROM {POOL_TABLE} WHERE head_sha = %(sha)s""",
             {"sha": head_sha},
         )
+    # Read by column name: reordering the SELECT list cannot shift values into the
+    # wrong keys, and a renamed column raises AttributeError here.
     return [
         {
-            "provider": r[0],
-            "repo": r[1],
-            "question_id": r[2],
-            "question": r[3],
-            "options": _as_options(r[4]),
-            "correct_index": int(r[5]),
-            "explanation": r[6],
-            "n_per_attempt": int(r[7]),
-            "pr_number": int(r[8]) if r[8] is not None else None,
+            "provider": r.provider,
+            "repo": r.repo,
+            "question_id": r.question_id,
+            "question": r.question,
+            "options": _as_options(r.options),
+            "correct_index": int(r.correct_index),
+            "explanation": r.explanation,
+            "n_per_attempt": int(r.n_per_attempt),
+            "pr_number": int(r.pr_number) if r.pr_number is not None else None,
         }
         for r in rows
     ]
@@ -166,11 +168,11 @@ def _recent_quizzes_rows(limit=_DEFAULT_LIMIT):
     )
     return [
         {
-            "provider": r[0],
-            "repo": r[1],
-            "head_sha": r[2],
-            "pr_number": int(r[3]) if r[3] is not None else None,
-            "has_passed_result": bool(r[5]),
+            "provider": r.provider,
+            "repo": r.repo,
+            "head_sha": r.head_sha,
+            "pr_number": int(r.pr) if r.pr is not None else None,
+            "has_passed_result": bool(r.has_passed_result),
         }
         for r in rows
     ]
@@ -263,7 +265,7 @@ def taker_progress(head_sha, taker, provider, repo):
     )
     consumed = set()
     for r in rows:
-        consumed.update(_as_options(r[0]))  # r[0] is JSON (or NULL on old rows)
+        consumed.update(_as_options(r.question_ids))  # JSON (or NULL on old rows)
     return {"attempts": len(rows), "consumed_ids": consumed}
 
 

@@ -1,12 +1,19 @@
 """Deterministic fixture-PR content generator for quiz E2E testing.
 
-Writes a fixed set of files under fixtures/sandbox/ (or --root). Output is
-byte-identical on every run, so fixture branches regenerate idempotently.
-Sizes map to quiz-pipeline behaviors:
+Writes a fixed set of files under fixtures/sandbox/ (or --root), and deletes the
+paths a fixture declares gone. Output is byte-identical on every run, so fixture
+branches regenerate idempotently. Fixtures map to quiz-pipeline behaviors:
 - small:  docs-only, ~12 lines    -> difficulty judge should rate near 0.2, N=1
 - medium: ~300 Python lines       -> judged difficulty visibly swings N
 - large:  ~4400 lines over 8 files -> skips the judge (>=4000 lines), N=20,
           one diff chunk per file, MAX_CHUNKS cap exercised
+- generated: a ~3500-line fake uv.lock plus a 12-line docs change -> the lock
+          file is skipped and does not size the quiz, so N stays 1 not 20
+- waived: the lock file alone -> nothing quizzable, so the gate is waived
+- deleted: deletes inventory.py and pricing.py, and rewrites orders.py to stop
+          importing them, so the reference hints run against a real surviving
+          caller. Not standalone: generate and commit medium first, or there is
+          nothing to remove.
 """
 import argparse
 from pathlib import Path
@@ -341,22 +348,95 @@ def find(key):
 '''
 
 
+def _fake_lock():
+    """A uv.lock-shaped file big enough to force N=20 if it were ever counted."""
+    packages = "\n\n".join(
+        f'[[package]]\nname = "fixture-pkg-{i:03d}"\nversion = "1.{i}.0"\n'
+        f'source = {{ registry = "https://pypi.org/simple" }}\n'
+        f'sdist = {{ hash = "sha256:{i:064x}" }}\n'
+        f'wheels = [{{ hash = "sha256:{i + 500:064x}" }}]'
+        for i in range(500)
+    )
+    return f'version = 1\nrequires-python = ">=3.10"\n\n{packages}\n'
+
+
+# Trimmed orders.py for the `deleted` fixture. The removed import lines are what
+# the reference hints latch onto.
+ORDERS_PY_STANDALONE = '''"""Order intake, reduced to status bookkeeping.
+
+Quiz fixture sandbox code; never imported by the application.
+"""
+
+VALID_STATUSES = ("draft", "reserved", "invoiced", "cancelled")
+
+
+class OrderError(Exception):
+    """Raised when an order transition is not allowed."""
+
+
+class Order:
+    """A customer order moving draft -> reserved -> invoiced (or cancelled)."""
+
+    def __init__(self, order_id, channel="web"):
+        self.order_id = order_id
+        self.channel = channel
+        self.status = "draft"
+        self.lines = []
+
+    def add_line(self, sku, quantity):
+        if self.status != "draft":
+            raise OrderError(f"order {self.order_id}: cannot edit a {self.status} order")
+        if quantity <= 0:
+            raise OrderError("line quantity must be positive")
+        self.lines.append((sku, quantity))
+
+    def advance(self, status):
+        """Move to `status`; stock and pricing are no longer handled here."""
+        if status not in VALID_STATUSES:
+            raise OrderError(f"unknown status: {status}")
+        self.status = status
+'''
+
+
 def small():
-    return {"NOTES.md": NOTES_MD}
+    return {"NOTES.md": NOTES_MD}, ()
 
 
 def medium():
-    return {"inventory.py": INVENTORY_PY, "orders.py": ORDERS_PY, "pricing.py": PRICING_PY}
+    return (
+        {"inventory.py": INVENTORY_PY, "orders.py": ORDERS_PY, "pricing.py": PRICING_PY},
+        (),
+    )
 
 
 def large():
-    return {
+    files = {
         f"dataset_{letter}.py": _dataset_module(letter, offset=i * 17)
         for i, letter in enumerate("abcdefgh")
     }
+    return files, ()
 
 
-FIXTURES = {"small": small, "medium": medium, "large": large}
+def generated():
+    return {"uv.lock": _fake_lock(), "NOTES.md": NOTES_MD}, ()
+
+
+def waived():
+    return {"uv.lock": _fake_lock()}, ()
+
+
+def deleted():
+    return {"orders.py": ORDERS_PY_STANDALONE}, ("inventory.py", "pricing.py")
+
+
+FIXTURES = {
+    "small": small,
+    "medium": medium,
+    "large": large,
+    "generated": generated,
+    "deleted": deleted,
+    "waived": waived,
+}
 
 
 def main():
@@ -366,14 +446,26 @@ def main():
     args = parser.parse_args()
 
     root = Path(args.root)
-    files = FIXTURES[args.size]()
+    files, deletions = FIXTURES[args.size]()
     for rel, content in sorted(files.items()):
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", newline="\n") as fh:
             fh.write(content)
+    removed = []
+    for rel in sorted(deletions):
+        path = root / rel
+        if path.exists():
+            path.unlink()
+            removed.append(rel)
     lines = sum(content.count("\n") for content in files.values())
-    print(f"{args.size}: {len(files)} files, {lines} lines under {root}")
+    summary = f"{args.size}: {len(files)} files, {lines} lines under {root}"
+    if deletions:
+        missing = sorted(set(deletions) - set(removed))
+        summary += f"; deleted {len(removed)}/{len(deletions)}"
+        if missing:
+            summary += f" (not present: {', '.join(missing)})"
+    print(summary)
 
 
 if __name__ == "__main__":

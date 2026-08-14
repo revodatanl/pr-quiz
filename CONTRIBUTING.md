@@ -13,7 +13,7 @@ for the tests. (Adopters and the installer need only Python 3.10+ — see
 [docs/adopting.md](docs/adopting.md#prerequisites).)
 
 ```bash
-just bootstrap                                  # generate .just/shell.justfile for your OS
+just bootstrap                                  # generate .just/shell.justfile for your OS; also enables .githooks
 python -m pip install -r requirements-dev.txt   # pinned dev dependencies
 just test                                       # run the unit suite (alias: just t; same command CI runs: python -m pytest tests/ -q)
 ```
@@ -62,7 +62,7 @@ databricks_template_schema.json  Init-template parameters (project name, host, c
 template/{{.project_name}}/      Template payload; paths below are relative to it
   databricks.yml.tmpl     Bundle config: deploy target, variables (model endpoint, table names)
   resources/              Bundle resources: schema, generation job, app
-  src/job/                Generation job (quiz_logic.py pure + unit-tested; prompts.py; github_diff.py)
+  src/job/                Generation job (quiz_logic.py + diff_corpus.py pure + unit-tested; prompts.py; github_diff.py)
   src/app/                Streamlit app (app_logic.py pure + unit-tested)
   sql/init_tables.sql.tmpl  Table definitions (question_pool, quiz_results)
 actions/gate-check/       Composite action wrapping gate_check.py (local or cross-repo)
@@ -137,14 +137,14 @@ to act, never to skip or weaken the assertion.
 
 ## Testing with fixture PRs
 
-`just fixture-prs [small medium large]` (re)creates deterministic PRs that
-exercise the pipeline end to end. Content comes from
+`just fixture-prs [small medium large generated deleted waived]` (re)creates
+deterministic PRs that exercise the pipeline end to end. Content comes from
 [scripts/gen_fixture_pr.py](scripts/gen_fixture_pr.py), written to
 `fixtures/sandbox/` on `fixture/*` branches (never on `main`). Needs a clean
 working tree and the same GitHub token as the recipes above.
 
 ```bash
-just fixture-prs              # (re)create all three: small, medium, large
+just fixture-prs              # (re)create all six, in dependency order
 just fixture-clean            # close open fixture/* PRs, delete their branches
 ```
 
@@ -155,7 +155,16 @@ just fixture-clean            # close open fixture/* PRs, delete their branches
   the question count.
 - **large** — ~4,470 lines across 8 files; exercises large-diff handling (the
   difficulty judge is skipped and the diff is split into chunks, see
-  [Limits and gotchas](docs/adopting.md#limits-and-gotchas)).
+  [Limits and known problems](docs/adopting.md#limits-and-known-problems)).
+- **generated** — a ~3,500-line fake `uv.lock` plus a 12-line docs change;
+  expect `N=1`, not the `N=20` the lock file's line count alone would force.
+- **deleted** — deletes two of `medium`'s modules and rewrites `orders.py` to
+  stop importing them; expect at most one impact question per deleted file, and
+  an N sized from the `orders.py` rewrite alone — deletions weigh zero. Branches off
+  `fixture/medium` (a diff only marks a file deleted if it exists on the base),
+  so build `medium` first and drive this one with `just run-job` — its base is
+  not `main`, so `/quiz` skips it.
+- **waived** — the lock file alone; expect a passing gate and no quiz.
 
 ## Security
 

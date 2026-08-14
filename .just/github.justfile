@@ -36,7 +36,7 @@ quiz-check pr_number:
   export GH_TOKEN=$(printf 'protocol=https\nhost=github.com\n' | git credential fill | grep '^password=' | cut -d= -f2);
   MSYS_NO_PATHCONV=1 gh pr comment "$1" --repo {{repo}} --body "/quiz-check"
 
-# (Re)create fixture PRs for quiz E2E testing: just fixture-prs [small medium large]
+# (Re)create fixture PRs for quiz E2E testing: just fixture-prs [small medium large generated deleted waived]
 [script]
 [group: 'github']
 fixture-prs *names:
@@ -44,21 +44,33 @@ fixture-prs *names:
   if ! git diff --quiet || ! git diff --cached --quiet; then
     echo "working tree not clean; commit or stash first" >&2; exit 1;
   fi
-  names="$*"; [ -n "$names" ] || names="small medium large";
+  names="$*"; [ -n "$names" ] || names="small medium large generated deleted waived";
   start=$(git rev-parse --abbrev-ref HEAD);
   tmp=$(mktemp -d);
+  # copied out of the tree because the loop switches branches under it; cygpath
+  # because native python cannot resolve the POSIX path mktemp prints
+  if command -v cygpath > /dev/null; then tmp=$(cygpath -m "$tmp"); fi
   cp scripts/gen_fixture_pr.py "$tmp/";
   git fetch origin main;
   for name in $names; do
     branch="fixture/$name";
-    git switch -C "$branch" --no-track origin/main;
-    rm -rf fixtures/sandbox;
+    # a PR diff only shows a file as DELETED if it exists on the base, so this
+    # fixture branches off fixture/medium, keeps its files, and targets it
+    if [ "$name" = "deleted" ]; then
+      base="fixture/medium";
+      git fetch origin "$base" || { echo "run 'just fixture-prs medium' first" >&2; exit 1; };
+      git switch -C "$branch" --no-track "origin/$base";
+    else
+      base="main";
+      git switch -C "$branch" --no-track origin/main;
+      rm -rf fixtures/sandbox;
+    fi;
     python "$tmp/gen_fixture_pr.py" "$name";
-    git add fixtures/sandbox;
+    git add -A fixtures/sandbox;
     git commit -m "test: $name fixture for quiz E2E";
     git push -f origin "$branch";
     if [ "$(gh pr list --repo {{repo}} --head "$branch" --state open --json number --jq length)" = "0" ]; then
-      MSYS_NO_PATHCONV=1 gh pr create --repo {{repo}} --head "$branch" --base main \
+      MSYS_NO_PATHCONV=1 gh pr create --repo {{repo}} --head "$branch" --base "$base" \
         --title "Fixture: $name quiz E2E" --body "Deterministic $name fixture. Comment /quiz to test.";
     fi;
   done;

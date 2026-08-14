@@ -3,13 +3,14 @@ flowchart TB
 %%{init: {'theme': 'neutral'}}%%
 
     %% ═══════════════════════════════════════════════════════════
-    %% PURPOSE: AI quiz merge gate (v2) — a PR can only merge to
-    %% main/master when the quiz-gate COMMIT STATUS is passing.
-    %% The quiz is AI-generated AUTOMATICALLY from the PR diff on
-    %% open/reopen and served via a WebApp; a passing status needs
-    %% the last published result to belong to the PR's latest
-    %% commit AND score 100%. Automated-dependency bots (e.g.
-    %% dependabot) bypass the quiz with an automatic passing status.
+    %% PURPOSE: This diagram shows the AI quiz merge gate (v2).
+    %% A PR merges to main or master only when the quiz-gate
+    %% commit status passes. The AI makes the quiz automatically
+    %% from the PR diff when the PR opens or reopens. A WebApp
+    %% shows the quiz. The status passes only when the last
+    %% published result belongs to the latest commit of the PR
+    %% and the score is 100%. Bots in the allow list, for example
+    %% dependabot, get a passing status without a quiz.
 
     %% READING GUIDE:
     %% - Subgraphs = process stages (PR, quiz generation, WebApp, gate)
@@ -17,20 +18,38 @@ flowchart TB
     %% - (["..."]) stadium = event trigger / terminal state
     %% - [("...")] cylinder = persistent stores
     %% - {"..."} diamond = decision points
-    %% - Generation is AUTOMATIC on PR open/reopen; a /quiz comment
-    %%   regenerates for the latest commit (e.g. after new commits).
-    %%   New commits (synchronize) set the gate PENDING via mark-stale.
-    %%   A /quiz-check comment re-evaluates the gate on demand.
-    %% - Question count N scales with PR size AND AI-judged
-    %%   difficulty (factor 0.2 – 5.0): N = size × difficulty,
-    %%   clamped 1 – 20. Very large diffs skip the judge (max N
-    %%   guaranteed). The AI generates at least 5 × N questions,
-    %%   prompted per diff chunk, so repeat attempts rotate questions.
+    %% - The quiz generates automatically when a PR opens or
+    %%   reopens. A /quiz comment makes a new quiz for the latest
+    %%   commit. New commits (synchronize) set the gate to pending
+    %%   with mark-stale. A /quiz-check comment evaluates the gate
+    %%   again.
+    %% - The quiz uses only reviewable changes. The run removes all
+    %%   generated files (lock files, minified bundles, vendored
+    %%   trees, code generation output). For a deleted file, the
+    %%   quiz asks only about the result of the removal. Neither
+    %%   type adds to the size N. If nothing reviewable remains,
+    %%   the run waives the gate. It fails only if the PR also
+    %%   edits .gitattributes, because that PR rewrites the rules
+    %%   that emptied the diff.
+    %% - The list of generated paths comes from .gitattributes at
+    %%   the base commit of the PR, never at the head commit. The
+    %%   change under review must not select its own review scope.
+    %% - If GitHub does not return a text diff, the run rebuilds the
+    %%   diff from the two versions of the file. This diff counts
+    %%   toward N. If the run cannot rebuild the diff, the run
+    %%   fails. It never waives this error.
+    %% - The question count N comes from the reviewable size and the
+    %%   difficulty factor (0.2 to 5.0) that the AI gives.
+    %%   N = size × difficulty, with limits of 1 and 20. For a very
+    %%   large diff, the run skips the difficulty judge and uses the
+    %%   maximum N. The AI makes 5 × N questions or more, with one
+    %%   prompt for each diff chunk. Each new attempt then shows
+    %%   different questions.
 
     %% CROSS-SUBGRAPH RULE:
-    %% Cross-subgraph edges connect modules at SAME nesting
-    %% level, NOT individual children. Inter-subgraph edges
-    %% represent aggregate dependency between modules.
+    %% Cross-subgraph edges connect modules at the SAME nesting
+    %% level, not individual children. An edge between subgraphs
+    %% shows the total dependency between the two modules.
     %% ═══════════════════════════════════════════════════════════
 
     %% SECTION 1: NODES AND SUBGRAPHS (no connections here)
@@ -40,24 +59,27 @@ flowchart TB
 
     subgraph PullRequestFlow["Pull Request"]
         direction TB
-        OpenReopenPR["PR opened / reopened<br>(auto-triggers quiz)"]
-        PushCommits["Push new commits<br>(synchronize — updates head SHA)"]
-        CommentQuiz(["Comment /quiz<br>(regenerate for latest commit)"])
-        CommentQuizCheck(["Comment /quiz-check<br>(re-evaluate gate)"])
+        OpenReopenPR["PR opens or reopens<br>(starts the quiz automatically)"]
+        PushCommits["Push new commits<br>(synchronize — new head SHA)"]
+        CommentQuiz(["Comment /quiz<br>(make a new quiz for the latest commit)"])
+        CommentQuizCheck(["Comment /quiz-check<br>(evaluate the gate again)"])
     end
 
     subgraph QuizGeneration["Quiz Generation — AI"]
         direction TB
-        WaiveAuthorCheck{"PR author an<br>allow-listed bot?<br>(e.g. dependabot)"}
-        WaiveGate(["Post passing gate status<br>(waived — quiz skipped)"])
+        WaiveAuthorCheck{"PR author a bot<br>in the allow list?<br>(for example dependabot)"}
+        WaiveGate(["Post passing gate status<br>(waived — no quiz)"])
         NewCommitCheck{"Event = new commit<br>(synchronize)?"}
         MarkStalePending["mark-stale: set gate pending<br>on new head SHA"]
-        SetGatePending["Set gate status pending<br>(quiz being generated)"]
-        AnalyzeDiffSize["Analyze PR diff size"]
-        JudgeSkipCheck{"Diff ≥ ~4000<br>changed lines?"}
+        SetGatePending["Set gate status pending<br>(the AI makes the quiz)"]
+        FilterUnreviewable["Rebuild each diff GitHub withheld.<br>Remove generated files (built-in list,<br>base .gitattributes, configured globs).<br>Deleted files → result only, zero size"]
+        QuizzableCheck{"Anything<br>reviewable left?"}
+        WaiveNoContent(["Post passing gate status<br>(waived — nothing reviewable)"])
+        AnalyzeDiffSize["Analyze reviewable diff size"]
+        JudgeSkipCheck{"4000 changed lines<br>or more?"}
         JudgeDifficulty["AI judges diff difficulty<br>(factor 0.2 – 5.0)"]
         ComputeQuestionCount["Compute question count N<br>(size × difficulty → 1 – 20)"]
-        GenerateQuestions["AI generates ≥ 5 × N questions<br>(prompted per diff chunk, pool enables rotation)"]
+        GenerateQuestions["AI makes 5 × N questions or more<br>(one prompt for each diff chunk)"]
         PostQuizLink["Post quiz link comment on PR"]
     end
 
@@ -65,7 +87,7 @@ flowchart TB
         direction TB
         ServeRotatedQuestions["Serve N questions from pool<br>(each attempt gets different questions)"]
         SubmitAttempt["Submit attempt<br>(any team member)"]
-        GradeAttempt["Grade attempt & post commit<br>status (on every attempt)"]
+        GradeAttempt["Grade attempt and post commit<br>status (for every attempt)"]
         ScoreCheck{"Score 100%?"}
         PostPassComment["Post pass comment on PR"]
         QuizPassed(["Quiz passed"])
@@ -80,7 +102,7 @@ flowchart TB
         BlockMerge["Merge blocked<br>(quiz-gate status fails)"]
     end
 
-    QuestionPool[("Question pool<br>(≥ 5 × N per commit)")]
+    QuestionPool[("Question pool<br>(5 × N or more per commit)")]
     QuizResults[("Quiz results<br>(score + commit SHA)")]
     MainBranch[("main / master")]
 
@@ -92,26 +114,29 @@ flowchart TB
 
     %% Internal Pull Request flow
         OpenReopenPR --> PushCommits
-        PushCommits -->|"developer regenerates"| CommentQuiz
+        PushCommits -->|"developer asks for a new quiz"| CommentQuiz
 
-    %% Internal Quiz Generation flow (auto on open/reopen, or /quiz)
+    %% Internal Quiz Generation flow (automatic on open or reopen, or /quiz)
         WaiveAuthorCheck -->|"Yes — bot PR"| WaiveGate
         WaiveAuthorCheck -->|"No — human PR"| NewCommitCheck
         NewCommitCheck -->|"Yes — new commit"| MarkStalePending
-        NewCommitCheck -->|"No — open/reopen or /quiz"| SetGatePending
-        SetGatePending --> AnalyzeDiffSize
+        NewCommitCheck -->|"No — open, reopen, or /quiz"| SetGatePending
+        SetGatePending --> FilterUnreviewable
+        FilterUnreviewable --> QuizzableCheck
+        QuizzableCheck -->|"No — all generated<br>or binary"| WaiveNoContent
+        QuizzableCheck -->|"Yes"| AnalyzeDiffSize
         AnalyzeDiffSize --> JudgeSkipCheck
         JudgeSkipCheck -->|"No"| JudgeDifficulty
-        JudgeSkipCheck -->|"Yes — max N guaranteed,<br>neutral factor"| ComputeQuestionCount
+        JudgeSkipCheck -->|"Yes — use maximum N,<br>neutral factor"| ComputeQuestionCount
         JudgeDifficulty --> ComputeQuestionCount
         ComputeQuestionCount --> GenerateQuestions
         GenerateQuestions --> PostQuizLink
 
-    %% Internal WebApp flow (retake loop rotates questions)
+    %% Internal WebApp flow (a new attempt shows different questions)
         ServeRotatedQuestions --> SubmitAttempt
         SubmitAttempt --> GradeAttempt
         GradeAttempt --> ScoreCheck
-        ScoreCheck -->|"No — retake with<br>different questions"| ServeRotatedQuestions
+        ScoreCheck -->|"No — new attempt with<br>different questions"| ServeRotatedQuestions
         ScoreCheck -->|"Yes"| PostPassComment
         PostPassComment --> QuizPassed
 
@@ -123,19 +148,19 @@ flowchart TB
         PerfectScoreCheck -->|"No"| BlockMerge
 
     %% Cross-module flow
-    PullRequestFlow -->|"open/reopen, /quiz, or synchronize"| QuizGeneration
-    QuizGeneration -.->|"bot waiver → passing status"| MergeGateCI
-    QuizWebApp -.->|"posts commit status per attempt"| MergeGateCI
-    PullRequestFlow -.->|"/quiz-check re-evaluates gate"| MergeGateCI
-    %% Two-way dotted: gate reports blocked, developer reacts
+    PullRequestFlow -->|"open, reopen, /quiz, or synchronize"| QuizGeneration
+    QuizGeneration -.->|"waiver (bot author, or nothing<br>reviewable) → passing status"| MergeGateCI
+    QuizWebApp -.->|"posts commit status for each attempt"| MergeGateCI
+    PullRequestFlow -.->|"/quiz-check evaluates the gate again"| MergeGateCI
+    %% Two-way dotted: the gate reports blocked, the developer reacts
     Developer <-.->|"Blocked → comment /quiz<br>for the latest commit"| MergeGateCI
 
     %% Module ↔ store — QuestionPool ranks ABOVE the WebApp
-    %% (declared pool-first); QuizResults ranks BELOW the WebApp
-    %% and above the merge gate (declared WebApp-first, gate-after)
-    QuizGeneration ==x|"Store ≥ 5 × N questions"| QuestionPool
-    QuestionPool -->|"Serves N questions per attempt"| QuizWebApp
-    QuizWebApp ==x|"Publish result per commit"| QuizResults
+    %% (declared pool-first). QuizResults ranks BELOW the WebApp
+    %% and above the merge gate (declared WebApp-first, gate-after).
+    QuizGeneration ==x|"Store 5 × N questions or more"| QuestionPool
+    QuestionPool -->|"Serves N questions for each attempt"| QuizWebApp
+    QuizWebApp ==x|"Publish result for each commit"| QuizResults
     QuizResults -->|"Provides last published result"| MergeGateCI
 
     %% Output
@@ -160,8 +185,8 @@ flowchart TB
     legendTrigger ~~~ legendSuccess
     legendSuccess ~~~ legendError
 
-    %% Align the Developer actor directly beneath the Legend box
-    %% (defined after the LEGEND subgraph to avoid a forward reference)
+    %% Align the Developer actor directly below the Legend box.
+    %% Defined after the LEGEND subgraph to prevent a forward reference.
     LEGEND ~~~ Developer
 
     %% SECTION 4: STYLE DEFINITIONS (classDef)
@@ -185,13 +210,15 @@ flowchart TB
     %% SECTION 5: CLASS ASSIGNMENTS (group by type, not subgraph)
 
     class OpenReopenPR,PushCommits function
-    class SetGatePending,MarkStalePending,AnalyzeDiffSize,JudgeDifficulty,ComputeQuestionCount,GenerateQuestions,PostQuizLink function
+    class SetGatePending,MarkStalePending,FilterUnreviewable,AnalyzeDiffSize function
+    class JudgeDifficulty,ComputeQuestionCount,GenerateQuestions,PostQuizLink function
     class ServeRotatedQuestions,SubmitAttempt,GradeAttempt,PostPassComment function
     class ReadLatestResult,legendStep function
 
-    class CommentQuiz,CommentQuizCheck,WaiveGate,QuizPassed,legendTrigger trigger
+    class CommentQuiz,CommentQuizCheck,WaiveGate,WaiveNoContent,QuizPassed,legendTrigger trigger
     class QuestionPool,QuizResults,MainBranch,legendStore store
-    class WaiveAuthorCheck,NewCommitCheck,ScoreCheck,CommitMatchCheck,PerfectScoreCheck,JudgeSkipCheck,legendDecision decision
+    class WaiveAuthorCheck,NewCommitCheck,ScoreCheck,CommitMatchCheck,PerfectScoreCheck,JudgeSkipCheck decision
+    class QuizzableCheck,legendDecision decision
     class AllowMerge,legendSuccess success
     class BlockMerge,legendError error
     class Developer,TeamMember,legendActor actor

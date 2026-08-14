@@ -10,8 +10,6 @@ from quiz_logic import (
     allocate_questions,
     apply_ambiguity_results,
     batch_sizes,
-    chunk_files,
-    clamp_difficulty,
     compute_question_count,
     dedupe_questions,
     extract_text,
@@ -186,18 +184,6 @@ class TestParseQuestions:
             parse_questions(raw)
 
 
-class TestClampDifficulty:
-    def test_below_minimum_clamps_to_floor(self):
-        assert clamp_difficulty(0.05) == 0.2
-
-    def test_above_maximum_clamps_to_ceiling(self):
-        assert clamp_difficulty(7.3) == 5.0
-
-    def test_in_range_value_passes_through(self):
-        assert clamp_difficulty(1.5) == 1.5
-        assert clamp_difficulty(2) == 2.0
-
-
 class TestSkipDifficultyJudge:
     def test_below_threshold_does_not_skip(self):
         assert skip_difficulty_judge(3999) is False
@@ -248,44 +234,6 @@ class TestParseDifficulty:
     def test_invalid_json_raises_value_error(self):
         with pytest.raises(ValueError):
             parse_difficulty("not json {")
-
-
-class TestChunkFiles:
-    def _file(self, name, size, changed=10):
-        return {"filename": name, "text": "x" * size, "changed_lines": changed}
-
-    def test_all_files_fit_single_chunk(self):
-        files = [self._file("a.py", 100, changed=3), self._file("b.py", 200, changed=7)]
-        chunks = chunk_files(files, budget=1000)
-        assert len(chunks) == 1
-        assert chunks[0]["text"] == "x" * 100 + "\n\n" + "x" * 200
-        assert chunks[0]["changed_lines"] == 10
-        assert chunks[0]["filenames"] == ["a.py", "b.py"]
-
-    def test_overflow_splits_in_input_order(self):
-        files = [self._file("a.py", 60), self._file("b.py", 60), self._file("c.py", 60)]
-        chunks = chunk_files(files, budget=130)
-        assert [c["filenames"] for c in chunks] == [["a.py", "b.py"], ["c.py"]]
-        assert all(len(c["text"]) <= 130 for c in chunks)
-
-    def test_oversize_file_truncated_to_budget(self):
-        chunks = chunk_files([self._file("big.py", 500)], budget=100)
-        assert len(chunks) == 1
-        assert chunks[0]["text"] == "x" * 100
-
-    def test_max_chunks_cap_drops_tail_files(self):
-        files = [self._file(f"f{i}.py", 60) for i in range(4)]
-        chunks = chunk_files(files, budget=60, max_chunks=2)
-        assert len(chunks) == 2
-        assert [c["filenames"] for c in chunks] == [["f0.py"], ["f1.py"]]
-
-    def test_empty_input_returns_empty_list(self):
-        assert chunk_files([]) == []
-
-    def test_file_exactly_at_budget_fits(self):
-        chunks = chunk_files([self._file("a.py", 100)], budget=100)
-        assert len(chunks) == 1
-        assert chunks[0]["text"] == "x" * 100
 
 
 class TestAllocateQuestions:

@@ -39,10 +39,23 @@ def build_gate_query(table: str) -> str:
     if not TABLE_NAME_RE.fullmatch(table):
         raise ValueError(f"invalid results table name: {table!r}")
     return (
-        f"SELECT score_pct, passed, submitted_at FROM {table} "
+        f"SELECT score_pct, passed, submitted_at, n_questions FROM {table} "
         "WHERE head_sha = :sha AND repo = :repo AND provider = :provider "
         "ORDER BY submitted_at DESC LIMIT 1"
     )
+
+
+def is_waiver(row: list) -> bool:
+    """True when the row records a waive rather than a quiz someone sat.
+
+    The job writes a passing, zero-question row when a PR has nothing quizzable.
+    A real attempt always asks at least one question. An unreadable question count
+    reads as an attempt, so only an explicit zero counts as a waive.
+    """
+    try:
+        return int(row[3]) == 0
+    except (IndexError, TypeError, ValueError):
+        return False
 
 
 def format_verdict(row: list | None, sha: str, repo: str) -> tuple[bool, str]:
@@ -53,6 +66,10 @@ def format_verdict(row: list | None, sha: str, repo: str) -> tuple[bool, str]:
         return False, clip_verdict(message)
     score, passed = float(row[0]), row[1] in ("true", "True", True)
     if passed and score == 100.0:
+        if is_waiver(row):
+            return True, clip_verdict(
+                f"PASSED: quiz waived on {repo}@{short} - no reviewable changes"
+            )
         return True, clip_verdict(f"PASSED: quiz scored 100% on {repo}@{short}")
     return False, clip_verdict(
         f"BLOCKED: last quiz on {repo}@{short} scored {score:.0f}% "

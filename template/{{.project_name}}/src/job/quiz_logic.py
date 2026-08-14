@@ -1,4 +1,8 @@
-"""Pure quiz-generation logic (no I/O) - unit-tested in tests/test_quiz_logic.py."""
+"""Pure quiz-generation logic (no I/O) - unit-tested in tests/test_quiz_logic.py.
+
+Sizing, request pacing and model-output parsing. diff_corpus.py turns the PR's
+diff into the corpus these questions are asked about.
+"""
 import json
 import math
 import re
@@ -14,8 +18,6 @@ MAX_DIFFICULTY_FACTOR = 5.0
 # so the difficulty judge call is skipped. Float (~3999.9999999999995): integer
 # comparisons around the boundary are still correct; never compare it for equality.
 JUDGE_SKIP_LINES = LINES_PER_QUESTION * MAX_QUESTIONS / MIN_DIFFICULTY_FACTOR
-CHUNK_CHAR_BUDGET = 30_000
-MAX_CHUNKS = 5  # 5 x 30k chars keeps total diff coverage at the old single-prompt limit
 RETRY_AFTER_CAP = 120  # trust Retry-After, but never park a worker longer than this
 SPACING_MIN = 1.0  # request-start spacing floor: long calls self-pace anyway
 SPACING_MAX = 8.0  # widening cap: past this, waiting out the 429 ladder is cheaper
@@ -44,26 +46,27 @@ def skip_difficulty_judge(changed_lines):
     return changed_lines >= JUDGE_SKIP_LINES
 
 
-def clamp_difficulty(factor):
-    """Clamp a judge-provided factor into [MIN_DIFFICULTY_FACTOR, MAX_DIFFICULTY_FACTOR]."""
-    return max(MIN_DIFFICULTY_FACTOR, min(MAX_DIFFICULTY_FACTOR, float(factor)))
+def _load(raw):
+    """json.loads, but a parse failure raises the ValueError callers retry on."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"model response is not valid JSON: {e}") from e
 
 
 def parse_difficulty(raw):
-    """Validate a difficulty-judge response; return the clamped factor.
+    """Validate a difficulty-judge response and return the clamped factor.
 
-    Raises ValueError on unparseable JSON or a missing/non-numeric/non-finite
-    difficulty_factor, so the caller can retry.
+    Clamped into [MIN_DIFFICULTY_FACTOR, MAX_DIFFICULTY_FACTOR]. Raises ValueError
+    on unparseable JSON or a missing, non-numeric or non-finite difficulty_factor,
+    so the caller can retry.
     """
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"model response is not valid JSON: {e}") from e
+    payload = _load(raw)
     factor = payload.get("difficulty_factor") if isinstance(payload, dict) else None
     # bool is an int subclass: JSON true must not become factor 1.0
     if isinstance(factor, bool) or not isinstance(factor, (int, float)) or not math.isfinite(factor):
         raise ValueError("model response has no numeric difficulty_factor")
-    return clamp_difficulty(factor)
+    return max(MIN_DIFFICULTY_FACTOR, min(MAX_DIFFICULTY_FACTOR, float(factor)))
 
 
 def retry_wait(attempt, retry_after=None):
@@ -121,14 +124,10 @@ def dedupe_questions(questions):
     removed after each round instead of relying only on the prompt's
     do-not-repeat list.
     """
-    seen = set()
-    unique = []
+    seen = {}
     for q in questions:
-        key = normalize_text(q["question"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(q)
-    return unique
+        seen.setdefault(normalize_text(q["question"]), q)
+    return list(seen.values())
 
 
 def parse_soft_dedup(raw, pool_size):
@@ -140,10 +139,7 @@ def parse_soft_dedup(raw, pool_size):
     anything malformed collapses to []. Raises ValueError on unparseable JSON
     or a missing/non-list duplicate_groups, so the caller can retry.
     """
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"model response is not valid JSON: {e}") from e
+    payload = _load(raw)
     raw_groups = payload.get("duplicate_groups") if isinstance(payload, dict) else None
     if not isinstance(raw_groups, list):
         raise ValueError("model response has no duplicate_groups list")
@@ -151,14 +147,13 @@ def parse_soft_dedup(raw, pool_size):
     for group in raw_groups:
         if not isinstance(group, list):
             continue
-        indices = []
-        for i in group:
-            # bool is an int subclass: JSON true must not become index 1
-            if (
-                isinstance(i, int) and not isinstance(i, bool)
-                and 0 <= i < pool_size and i not in indices
-            ):
-                indices.append(i)
+        # Filter before dict.fromkeys, which dedupes order-preserved but would
+        # raise on an unhashable junk entry. bool is an int subclass: JSON true
+        # must not become index 1.
+        indices = list(dict.fromkeys(
+            i for i in group
+            if isinstance(i, int) and not isinstance(i, bool) and 0 <= i < pool_size
+        ))
         if len(indices) >= 2:
             groups.append(indices)
     raw_topics = payload.get("covered_topics")
@@ -178,33 +173,6 @@ def remove_soft_duplicates(questions, groups):
     for group in groups:
         drop.update(i for i in group if i != min(group))
     return [q for i, q in enumerate(questions) if i not in drop]
-
-
-def chunk_files(files, budget=CHUNK_CHAR_BUDGET, max_chunks=MAX_CHUNKS):
-    """Group whole per-file patches, in input order, into per-prompt diff chunks.
-
-    A single file longer than budget becomes its own chunk, truncated. Once
-    max_chunks chunks exist, files that do not fit the last chunk are dropped
-    (bounds model calls, like the old single-prompt character truncation).
-    """
-    chunks = []
-    for f in files:
-        if chunks:
-            joined = chunks[-1]["text"] + "\n\n" + f["text"]
-            if len(joined) <= budget:
-                chunks[-1]["text"] = joined
-                chunks[-1]["changed_lines"] += f["changed_lines"]
-                chunks[-1]["filenames"].append(f["filename"])
-                continue
-        if len(chunks) < max_chunks:
-            chunks.append(
-                {
-                    "text": f["text"][:budget],
-                    "changed_lines": f["changed_lines"],
-                    "filenames": [f["filename"]],
-                }
-            )
-    return chunks
 
 
 def allocate_questions(total, weights):
@@ -257,11 +225,7 @@ def parse_questions(raw):
     Drops malformed entries; raises ValueError on unparseable JSON or when
     nothing valid remains, so the caller can retry the batch.
     """
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"model response is not valid JSON: {e}") from e
-
+    payload = _load(raw)
     valid = []
     for q in payload.get("questions", []):
         question = str(q.get("question", "")).strip()
@@ -295,10 +259,7 @@ def parse_ambiguity_verdicts(raw, valid_indices):
     JSON or when no verdict references a requested index (the model ignored
     the task), so the caller can retry.
     """
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"model response is not valid JSON: {e}") from e
+    payload = _load(raw)
     raw_verdicts = payload.get("verdicts") if isinstance(payload, dict) else None
     verdicts = {}
     for v in raw_verdicts if isinstance(raw_verdicts, list) else []:
@@ -322,10 +283,7 @@ def parse_distractors(raw, correct_answer):
     OPTIONS_PER_QUESTION - 1 non-empty distractors survive that are pairwise
     distinct and distinct from the correct answer under normalize_text.
     """
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"model response is not valid JSON: {e}") from e
+    payload = _load(raw)
     raw_distractors = payload.get("distractors") if isinstance(payload, dict) else None
     if not isinstance(raw_distractors, list):
         raise ValueError("model response has no distractors list")

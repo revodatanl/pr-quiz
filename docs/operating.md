@@ -4,112 +4,137 @@ status: current
 
 # Operating the backend
 
-This guide is for the Databricks workspace admin who deploys and maintains the
-pr-quiz backend that one or more repos share. Adopters wire their repos to it
-separately — see [adopting.md](adopting.md).
+This guide is for the Databricks workspace administrator who deploys and
+maintains the pr-quiz backend. One or more repos share this backend. The repo
+maintainers connect their repos to it separately — see
+[adopting.md](adopting.md).
 
 ## What the backend is
 
-One backend serves the quiz for every repo that points at it. It consists of:
+One backend serves the quiz for every repo that uses it. It holds these parts:
 
 - a Unity Catalog schema (default `workspace.pr_quiz`) with two Delta tables,
-  `question_pool` and `quiz_results`;
-- a serverless job (`pr-quiz-generator`) that generates questions from a PR
-  diff;
-- a Streamlit app (`pr-quiz`) that serves and grades quizzes and posts commit
-  statuses;
+  `question_pool` and `quiz_results`
+- a serverless job (`pr-quiz-generator`) that generates questions from the diff
+  of a PR
+- a Streamlit app (`pr-quiz`) that serves the quizzes, grades them, and writes
+  commit statuses
 - a **CI service principal** (`pr-quiz-ci`) that GitHub Actions uses to run the
-  job and manage the app.
+  job and to manage the app
 
-Before deploying, check the backend-operator column in
-[adopting.md Prerequisites](adopting.md#prerequisites) for the workspace
-rights and tools you need.
+Before you deploy, read the backend-operator column in [adopting.md
+Prerequisites](adopting.md#prerequisites). It lists the workspace rights and the
+tools that you need.
 
 ## Deploying
 
-Use the installer's `backend` step (org admin, once per workspace):
+The organization administrator runs the `backend` step of the installer one time
+for each workspace:
 
 ```bash
 python installer/pr_quiz_install.py doctor --profile <p>
 python installer/pr_quiz_install.py backend --profile <p>
 ```
 
-`backend` renders and deploys the bundle, creates the tables, stores the GitHub
-token secret, creates the CI service principal, applies grants, and writes
-`pr-quiz-backend.json` — the handoff file adopters need. `--dry-run` previews
-the mutating commands; `--force` re-renders, overwrites secrets, and mints a
-new SP secret. Re-runs are idempotent.
+The `backend` step does this work:
 
-For this repo's own dogfood backend, the equivalent `just` recipes exist
-(`just deploy`, `just init-tables`, `just put-github-secret`,
-`just create-ci-sp`, `just grants`, `just protect`); the installer is the
-canonical path for a fresh workspace.
+- It renders the bundle and deploys it.
+- It creates the tables.
+- It stores the GitHub token secret.
+- It creates the CI service principal and applies the grants.
+- It writes `pr-quiz-backend.json`, the handoff file that repo maintainers need.
+
+The `--dry-run` flag shows the commands that change the workspace, but it does
+not run them. The `--force` flag renders the bundle again, overwrites the
+secrets, and creates a new secret for the service principal. A second run is
+idempotent: it makes no duplicate resources.
+
+This repo also has its own backend, which runs the quiz on the PRs of pr-quiz
+itself. The equivalent `just` recipes are `just deploy`, `just init-tables`,
+`just put-github-secret`, `just create-ci-sp`, `just grants`, and
+`just protect`. For a new workspace, use the installer.
 
 ## Serverless environment version
 
-The generation job (`pr-quiz-generator`) runs on serverless job compute and pins
+The generation job (`pr-quiz-generator`) runs on serverless job compute. It pins
 `environment_version: "4"` in
 [`template/{{.project_name}}/resources/quiz_job.yml`](../template/%7B%7B.project_name%7D%7D/resources/quiz_job.yml).
-That serverless base environment supplies the Python runtime plus the
-third-party libraries the job imports at run time — `requests` and
-`databricks-sdk` — alongside Spark. Bumping the version is a deliberate, tested
-change: a new base image can shift library versions and behavior. After any
-bump, re-run the test suite (`just test`) and a live generation
+That serverless base environment supplies Spark, the Python runtime, and the
+third-party libraries that the job imports at run time: `requests` and
+`databricks-sdk`.
+
+A new version is a deliberate change that you must test, because a new base
+image can change library versions and behavior. After a change of the version,
+run the test suite again (`just test`). Then run a live generation
 (`just run-job <pr_number> <head_sha> <repo>`).
 
 ## Grants
 
-Both service principals need scoped access — the installer's `backend` applies
-this; the `just grants` recipe is the reference:
+Both service principals need limited access. The `backend` step of the installer
+applies these grants, and the `just grants` recipe is the reference:
 
-- **App service principal**: `USE CATALOG` on the catalog; `USE SCHEMA`,
-  `SELECT`, `MODIFY` on the schema; and `CAN_READ` on the deploying user's
-  bundle folder (an app start fails with "no files found" without it).
-- **CI service principal**: `USE CATALOG`; `USE SCHEMA`, `SELECT` on the schema;
-  `CAN_USE` on the warehouse; `CAN_MANAGE_RUN` on the job; `CAN_MANAGE` on the
-  app; and `CAN_READ` on the bundle folder.
+- **App service principal**: `USE CATALOG` on the catalog. `USE SCHEMA`,
+  `SELECT`, and `MODIFY` on the schema. `CAN_READ` on the bundle folder of the
+  user that deploys. Without `CAN_READ`, the app does not start, and it reports
+  "no files found".
+- **CI service principal**: `USE CATALOG` on the catalog. `USE SCHEMA` and
+  `SELECT` on the schema. `CAN_USE` on the warehouse. `CAN_MANAGE_RUN` on the
+  job. `CAN_MANAGE` on the app. `CAN_READ` on the bundle folder.
 
-Keep schema `SELECT` limited to these principals plus operators. Anyone with
-`SELECT` can read quiz questions **and their correct answers** from
-`question_pool` — the quiz is a good-faith review aid, not a secret exam.
+Give `SELECT` on the schema only to these principals and to the operators. A
+user with `SELECT` can read the quiz questions **and their correct answers**
+from `question_pool`. The quiz is an aid for review in good faith, not a secret
+examination.
 
 ## Secret and token rotation
 
-- **GitHub token** (Databricks secret, default scope key `github_token`): used
-  by the generation job to read PR diffs and post statuses. Rotate by storing a
-  new token: `databricks secrets put-secret <scope> <key> --string-value <tok>`
-  (or `just put-github-secret`, which scrapes it from your git credentials).
-  The job falls back to anonymous diff access if the secret is missing, which
-  is rate-limited and fails on private repos.
-- **CI service-principal OAuth secret** (`DATABRICKS_CLIENT_SECRET` in each
-  consumer repo): Databricks OAuth secrets for service principals **expire**.
-  Track the expiry and rotate before it lapses — mint a new secret on the SP
-  page (Settings > Identity and access > Service principals > `pr-quiz-ci` >
-  Secrets) and update `DATABRICKS_CLIENT_SECRET` in every consumer repo. A
-  lapsed secret breaks quiz generation and the gate for **all** repos on this
-  backend at once.
-- **GitHub token expiry**: if you used a fine-grained or classic PAT rather than
-  a GitHub App installation token, it also expires — rotate it the same way.
+- **GitHub token** (a Databricks secret, default scope key `github_token`). The
+  generation job uses this token to read PR diffs and to write commit statuses.
+  To rotate the token, store a new one with
+  `databricks secrets put-secret <scope> <key> --string-value <tok>`. The recipe
+  `just put-github-secret` does the same, and it takes the token from your git
+  credentials. If the secret is absent, the job reads the diffs anonymously.
+  GitHub limits the rate of anonymous requests, and anonymous access fails on a
+  private repo.
+- **OAuth secret of the CI service principal** (`DATABRICKS_CLIENT_SECRET` in
+  each consumer repo). A Databricks OAuth secret for a service principal
+  **expires**. Record the expiry date, and replace the secret before that date.
+  Create a new secret on the page of the service principal (Settings > Identity
+  and access > Service principals > `pr-quiz-ci` > Secrets). Then update
+  `DATABRICKS_CLIENT_SECRET` in every consumer repo. An expired secret stops
+  quiz generation and the gate for **all** repos on this backend at the same
+  time.
+- **Expiry of the GitHub token**. If you stored a fine-grained PAT or a classic
+  PAT instead of an installation token of a GitHub App, that token also expires.
+  Rotate it in the same way.
 
 ## Warehouse cost
 
-The gate query and the app's grading queries run on a SQL warehouse (on Free
-Edition, the Serverless Starter Warehouse). Cost is driven by how often quizzes
-are generated and taken, and by the warehouse auto-stop setting. Keep auto-stop
-short. Question generation runs on serverless job compute and calls a
-foundation-model endpoint; large diffs generate more questions and more model
-calls (capped at 20 questions and 5 diff chunks).
+The gate query and the grading queries of the app run on a SQL warehouse. On
+Free Edition, this warehouse is the Serverless Starter Warehouse. Two factors
+drive the cost: the number of quizzes that users generate and take, and the
+auto-stop setting of the warehouse. A short auto-stop time keeps the cost low.
+
+Question generation runs on serverless job compute, and it calls a
+foundation-model endpoint. A large diff gives more questions and more model
+calls. The limits are 20 questions and 5 diff chunks. Generated files and the
+contents of deleted files do not count toward the question count. A PR that is
+mostly lockfile changes therefore costs much less than its line count suggests.
+See [Skipped files](adopting.md#skipped-files).
 
 ## Teardown
 
-To decommission a backend:
+To remove a backend:
 
-1. Remove branch protection and the caller workflows from every consumer repo
-   (or run the installer's onboard with protection disabled), so repos stop
-   depending on it.
-2. Delete the bundle-deployed resources: `databricks bundle destroy` from the
-   rendered bundle directory (removes the job, app, and schema resources).
-3. Drop the schema/tables if `destroy` left them, revoke the grants, and delete
-   the CI service principal.
-4. Remove the GitHub token secret and its scope if unused elsewhere.
-5. Delete `pr-quiz-backend.json` and any local `.ci-sp-client-id` file.
+1. Remove the branch protection and the caller workflows from every consumer
+   repo, so that no repo depends on the backend. Alternatively, run the
+   `onboard` step of the installer with branch protection disabled.
+2. Remove the resources that the bundle deployed. Run
+   `databricks bundle destroy` from the rendered bundle directory. This command
+   removes the job, the app, and the schema resources.
+3. If `destroy` left the schema or the tables, remove them. Revoke the grants.
+   Remove the CI service principal.
+4. Remove the GitHub token secret. If no other system uses the scope, remove the
+   scope.
+5. Remove `pr-quiz-backend.json`. If a local `.ci-sp-client-id` file exists,
+   remove it too.

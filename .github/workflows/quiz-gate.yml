@@ -36,6 +36,14 @@ on:
           (e.g. "OWNER,MEMBER,COLLABORATOR").
         type: string
         default: OWNER,MEMBER,COLLABORATOR
+      waive_authors:
+        description: >
+          Comma-separated PR author logins whose PRs bypass the quiz gate. Keep
+          identical to the quiz-generate input of the same name: those PRs never
+          produce a quiz result, so without this a /quiz-check would find no row
+          and block the very PR quiz-generate waived.
+        type: string
+        default: dependabot[bot]
     secrets:
       databricks_host:
         description: Databricks workspace URL.
@@ -98,7 +106,7 @@ jobs:
 
       # Event-derived values go through env, never inline ${{ }} inside run
       # scripts (shell-injection hardening; same rule for every step).
-      - name: Resolve PR head SHA
+      - name: Resolve PR head SHA and author
         id: pr
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -113,11 +121,35 @@ jobs:
           case "$pr" in
             ''|*[!0-9]*) echo "::error::pr_number must be a PR number, got '$pr'."; exit 1;;
           esac
-          sha=$(gh pr view "$pr" --repo "$REPO" --json headRefOid --jq .headRefOid)
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # REST, not `gh pr view --json author`: that spells a GitHub App author
+          # "app/dependabot" where quiz-generate matches "dependabot[bot]".
+          pr_json=$(gh api "repos/$REPO/pulls/$pr")
+          sha=$(jq -r .head.sha <<<"$pr_json")
+          author=$(jq -r .user.login <<<"$pr_json")
+          echo "PR #$pr head=$sha author=$author"
+          {
+            echo "sha=$sha"
+            echo "author=$author"
+          } >> "$GITHUB_OUTPUT"
+
+      # An allow-listed bot's PR never produces a quiz result, so the gate query
+      # would find no row and block a PR quiz-generate already waived. Padded
+      # match so a partial login cannot substring-match into the list.
+      - name: Check whether the PR author is waived
+        id: waive
+        env:
+          AUTHOR: ${{ steps.pr.outputs.author }}
+          WAIVE_AUTHORS: ${{ inputs.waive_authors }}
+        run: |
+          if printf ',%s,' "$WAIVE_AUTHORS" | grep -qF ",$AUTHOR,"; then
+            echo "waived=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "waived=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Evaluate merge gate against quiz results
         id: gate
+        if: steps.waive.outputs.waived != 'true'
         # Remote form on purpose: a `./actions/gate-check` path inside a
         # reusable workflow would resolve against the CALLER's repository and
         # break for every consumer. The remote form works for this repo's own
@@ -143,11 +175,15 @@ jobs:
           STATUS_CONTEXT: ${{ inputs.status_context }}
           PASSED: ${{ steps.gate.outputs.passed }}
           VERDICT: ${{ steps.gate.outputs.verdict }}
+          WAIVED: ${{ steps.waive.outputs.waived }}
         run: |
           # An ERROR verdict is an infra/config failure, not a blocked gate
           # (gate_check.py prefixes it "ERROR:"); publish state=error to match
           # quiz-generate's error path rather than a plain failure.
-          if [ "$PASSED" = "true" ]; then
+          if [ "$WAIVED" = "true" ]; then
+            state=success
+            VERDICT="Quiz waived: automated dependency update"
+          elif [ "$PASSED" = "true" ]; then
             state=success
           elif [ "${VERDICT#ERROR}" != "$VERDICT" ]; then
             state=error

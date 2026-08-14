@@ -49,7 +49,6 @@ class TestQuizPromptTemplate:
         assert "Never ask for a definition that is true everywhere" in flat
         assert "What does CI stand for?" in flat
 
-
 class TestSoftDedupPromptTemplate:
     def test_formats_questions_placeholder(self):
         prompt = SOFT_DEDUP_PROMPT_TEMPLATE.format(questions="0. sentinel_question")

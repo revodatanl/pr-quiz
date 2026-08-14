@@ -50,6 +50,15 @@ on:
           by the caller's `branches:`). Empty = generate for any base branch.
         type: string
         default: ''
+      generated_globs:
+        description: >
+          Extra glob patterns for machine-generated paths to skip when
+          generating questions, on top of the built-in list (lock files,
+          minified bundles, vendored trees, codegen output) and whatever the
+          repo's own .gitattributes marks linguist-generated. Comma-separated,
+          no spaces (e.g. "dist/*,*.pb.h").
+        type: string
+        default: ''
     secrets:
       databricks_host:
         description: Databricks workspace URL.
@@ -218,6 +227,7 @@ jobs:
           PR: ${{ steps.pr.outputs.pr }}
           SHA: ${{ steps.pr.outputs.sha }}
           REPO: ${{ github.repository }}
+          GENERATED_GLOBS: ${{ inputs.generated_globs }}
         run: |
           job_id=$(databricks jobs list --name "$JOB_NAME" -o json | jq -r '.[0].job_id // empty')
           if [ -z "$job_id" ]; then
@@ -227,11 +237,32 @@ jobs:
           # provider is omitted, so the job falls back to its 'github' default;
           # a provider input here is the v2 extension point for other SCMs.
           payload=$(jq -cn --argjson job_id "$job_id" --arg pr "$PR" --arg sha "$SHA" --arg repo "$REPO" \
-            '{job_id: $job_id, job_parameters: {pr_number: $pr, head_sha: $sha, repo: $repo}}')
+            --arg globs "$GENERATED_GLOBS" \
+            '{job_id: $job_id, job_parameters: {pr_number: $pr, head_sha: $sha, repo: $repo, generated_globs: $globs}}')
           databricks jobs run-now --json "$payload"
 
-      - name: Post quiz link on the PR
+      # The job waives the gate itself when a PR has nothing quizzable, and
+      # run-now blocks until it finishes - so a green gate here means there is no
+      # quiz to take and the link below would point at an empty app.
+      - name: Detect a waived gate
+        id: gate
         if: steps.pr.outputs.proceed == 'true'
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.pr.outputs.sha }}
+          STATUS_CONTEXT: ${{ inputs.status_context }}
+        run: |
+          state=$(gh api "repos/$REPO/commits/$SHA/status" \
+            --jq ".statuses[] | select(.context == \"$STATUS_CONTEXT\") | .state" | tail -n1)
+          echo "state=$state"
+          if [ "$state" = "success" ]; then
+            echo "waived=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "waived=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post quiz link on the PR
+        if: steps.pr.outputs.proceed == 'true' && steps.gate.outputs.waived != 'true'
         env:
           PR: ${{ steps.pr.outputs.pr }}
           SHA: ${{ steps.pr.outputs.sha }}
