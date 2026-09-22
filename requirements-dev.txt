@@ -7,5 +7,5 @@ pyyaml==6.0.3
 streamlit==1.61.1
 requests==2.34.2
 databricks-sdk==0.125.0
-commitizen==4.17.0
+commitizen==4.18.1
 zizmor==1.29.0
