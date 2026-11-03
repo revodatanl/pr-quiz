@@ -2,7 +2,7 @@
 # Used by CI (the test and zizmor jobs) and by local contributors. Version
 # bumps are manual and deliberate; hash-pinning via pip-compile is a later
 # upgrade (see RELEASING/CONTRIBUTING).
-pytest==9.1.1
+pytest==9.2.0
 pyyaml==6.0.3
 streamlit==1.61.1
 requests==2.34.2
