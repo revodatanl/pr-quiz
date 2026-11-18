@@ -57,7 +57,10 @@ from quiz_logic import (
     reserve_slot,
     retry_wait,
     skip_difficulty_judge,
+    STRUCTURED_OUTPUT_UNSUPPORTED,
+    strip_code_fence,
     widen_spacing,
+    without_structured_output,
 )
 from diff_corpus import chunk_files, parse_glob_list
 import github_diff
@@ -124,6 +127,11 @@ def _relax_request_spacing():
         _gate_spacing = narrow_spacing(_gate_spacing)
 
 
+# Flips to False on the first "structured output not supported" 400 so later
+# calls skip the doomed request (see without_structured_output).
+_structured_output = True
+
+
 def _call_endpoint(w, endpoint, body, parse, label="model"):
     """POST one serving-endpoint request with retries; parse validates each attempt.
 
@@ -131,11 +139,14 @@ def _call_endpoint(w, endpoint, body, parse, label="model"):
     MAX_ATTEMPTS, while 429s — transient by definition — get
     MAX_RATE_LIMIT_ATTEMPTS to outlast the endpoint's opaque budget refill.
     """
+    global _structured_output
     url = f"{w.config.host}/serving-endpoints/{endpoint}/invocations"
     errors = 0
     throttles = 0
     last_error = None
     while errors < MAX_ATTEMPTS and throttles < MAX_RATE_LIMIT_ATTEMPTS:
+        if not _structured_output and "response_format" in body:
+            body = without_structured_output(body)
         waited = _acquire_request_slot()
         if waited > 2:
             log(f"{label}: waited {waited:.0f}s for a request slot")
@@ -146,8 +157,13 @@ def _call_endpoint(w, endpoint, body, parse, label="model"):
                 wait = retry_wait(throttles, r.headers.get("Retry-After"))
                 _delay_requests(wait, label)
                 raise _RateLimited(f"rate limited (429), backing off {wait:.0f}s")
+            if (r.status_code == 400 and "response_format" in body
+                    and STRUCTURED_OUTPUT_UNSUPPORTED in r.text):
+                _structured_output = False
+                log(f"{label}: endpoint rejects structured output; schema moved into the prompt")
+                continue
             r.raise_for_status()
-            content = extract_text(r.json()["choices"][0]["message"]["content"])
+            content = strip_code_fence(extract_text(r.json()["choices"][0]["message"]["content"]))
             result = parse(content)
             _relax_request_spacing()
             log(f"{label}: ok in {time.monotonic() - started:.0f}s")
