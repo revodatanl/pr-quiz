@@ -13,6 +13,8 @@ from quiz_logic import (
     compute_question_count,
     dedupe_questions,
     extract_text,
+    strip_code_fence,
+    without_structured_output,
     is_valid_repo,
     normalize_text,
     parse_ambiguity_verdicts,
@@ -665,3 +667,28 @@ class TestSoftDedupContract:
         })
         parsed = parse_soft_dedup(raw, len(qs))
         assert remove_soft_duplicates(qs, parsed["groups"]) == [qs[0], qs[2]]
+
+
+def test_without_structured_output_moves_the_schema_into_the_prompt():
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    body = {
+        "messages": [{"role": "user", "content": "q"}],
+        "max_tokens": 10,
+        "response_format": {"type": "json_schema", "json_schema": {"name": "t", "schema": schema}},
+    }
+
+    out = without_structured_output(body)
+
+    assert "response_format" not in out
+    assert out["max_tokens"] == 10
+    assert out["messages"][0] == {"role": "user", "content": "q"}
+    assert json.dumps(schema) in out["messages"][-1]["content"]
+    assert "response_format" in body and len(body["messages"]) == 1  # input untouched
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['{"a": 1}', '```json\n{"a": 1}\n```', '```\n{"a": 1}\n```', '  ```json {"a": 1} ```  '],
+)
+def test_strip_code_fence_returns_the_bare_json(text):
+    assert json.loads(strip_code_fence(text)) == {"a": 1}

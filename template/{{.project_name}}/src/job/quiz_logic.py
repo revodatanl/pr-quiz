@@ -219,6 +219,29 @@ def extract_text(content):
     )
 
 
+# Databricks returns this (400) for models that reject forced tool use, e.g.
+# Claude Opus 5.5: any response_format fails, json_schema and json_object alike.
+STRUCTURED_OUTPUT_UNSUPPORTED = "Structured output is not supported"
+
+
+def without_structured_output(body):
+    """Copy of a request body with response_format replaced by a prompt instruction."""
+    schema = body["response_format"]["json_schema"]["schema"]
+    instruction = (
+        "Reply with only one JSON object that matches this JSON Schema. "
+        "No prose and no code fences.\n" + json.dumps(schema)
+    )
+    out = {k: v for k, v in body.items() if k != "response_format"}
+    out["messages"] = [*body["messages"], {"role": "user", "content": instruction}]
+    return out
+
+
+def strip_code_fence(text):
+    """Unwrap a reply fenced as ```json ... ```; without structured output models may add one."""
+    m = re.fullmatch(r"\s*```(?:json)?\s*(.*?)\s*```\s*", text, re.DOTALL)
+    return m.group(1) if m else text
+
+
 def parse_questions(raw):
     """Validate a model response; return clean question dicts.
 
